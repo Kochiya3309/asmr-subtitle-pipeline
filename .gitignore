@@ -1,0 +1,22 @@
+# 虚拟环境
+venv/
+
+# 音频和输出
+audio/*
+output/*
+
+# 例外：保留目录结构
+!audio/.gitkeep
+!output/.gitkeep
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境变量
+.env
+
+# 系统文件
+Thumbs.db
+.DS_Store

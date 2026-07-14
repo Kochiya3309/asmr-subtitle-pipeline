@@ -1,0 +1,786 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2025 Kochiya3309
+import os
+import time
+import json
+import re
+import hashlib
+import builtins
+from openai import OpenAI
+
+# ======================================================================
+#  文件日志（通过 monkey-patch builtins.print 实现）
+# ======================================================================
+
+_original_print = builtins.print
+_log_fp = None
+
+def _init_logging():
+    global _log_fp
+    log_file = os.environ.get("LOG_FILE")
+    if log_file and _log_fp is None:
+        log_dir = os.path.dirname(os.path.abspath(log_file))
+        os.makedirs(log_dir, exist_ok=True)
+        _log_fp = open(log_file, "a", encoding="utf-8")
+
+        def _logged_print(*args, **kwargs):
+            _original_print(*args, **kwargs)
+            # 过滤掉 file 和 flush，但只处理 kwargs 中的
+            # 如果有人用位置参数传 file，则不做特殊处理（极罕见）
+            log_kwargs = {k: v for k, v in kwargs.items() if k not in ('file', 'flush')}
+            log_kwargs['file'] = _log_fp
+            log_kwargs['flush'] = True
+            _original_print(*args, **log_kwargs)
+
+        builtins.print = _logged_print
+
+_init_logging()
+
+# ======================================================================
+#  全局搜索缓存
+# ======================================================================
+_search_cache = {}
+_search_cache_hits = 0
+_search_cache_misses = 0
+
+def clear_search_cache():
+    global _search_cache, _search_cache_hits, _search_cache_misses
+    _search_cache = {}
+    _search_cache_hits = 0
+    _search_cache_misses = 0
+
+def get_search_cache_stats():
+    total = _search_cache_hits + _search_cache_misses
+    rate = f"{_search_cache_hits}/{total}" if total > 0 else "0/0"
+    return f"搜索缓存命中：{rate}（节省 {_search_cache_hits} 次智谱 API 调用）"
+
+# ======================================================================
+#  全局 Token 统计
+# ======================================================================
+_usage = {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "cached_tokens": 0,
+    "deepseek_calls": 0,
+    "zhipu_calls": 0,
+}
+
+def reset_usage():
+    global _usage
+    _usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "deepseek_calls": 0,
+        "zhipu_calls": 0,
+    }
+
+def _add_usage(u):
+    global _usage
+    if u is None:
+        return
+    _usage["prompt_tokens"] += getattr(u, 'prompt_tokens', 0) or 0
+    _usage["completion_tokens"] += getattr(u, 'completion_tokens', 0) or 0
+    _usage["total_tokens"] += getattr(u, 'total_tokens', 0) or 0
+    details = getattr(u, 'prompt_tokens_details', None)
+    if details:
+        cached = getattr(details, 'cached_tokens', None)
+        if cached is not None:
+            _usage["cached_tokens"] += cached
+
+def get_usage_report():
+    u = _usage
+    total = u["total_tokens"]
+    if total == 0:
+        return "（本次未调用 DeepSeek API）"
+    prompt = u["prompt_tokens"]
+    cached = u["cached_tokens"]
+    missed = prompt - cached
+    cache_rate = (cached / prompt * 100) if prompt > 0 else 0
+    input_cached_price = 0.025
+    input_missed_price = 3.0
+    output_price = 6.0
+    input_cost = (cached * input_cached_price + missed * input_missed_price) / 1_000_000
+    output_cost = u["completion_tokens"] / 1_000_000 * output_price
+    total_cost = input_cost + output_cost
+    zhipu_cost = u["zhipu_calls"] * 0.0005
+    lines = [
+        "=" * 55,
+        "  Token 消耗报告",
+        "=" * 55,
+        f"  DeepSeek 调用：{u['deepseek_calls']} 次",
+        f"  智谱搜索：    {u['zhipu_calls']} 次（约 ¥{zhipu_cost:.4f}）",
+        f"  输入 tokens： {prompt:>10,}",
+        f"    缓存命中：  {cached:>10,}（{cache_rate:.1f}%）",
+        f"    实际计费：  {missed:>10,}（未命中部分）",
+        f"  输出 tokens： {u['completion_tokens']:>10,}",
+        f"  总计 tokens： {total:>10,}",
+        "  ──────────────────────────────────",
+        f"  精确费用：    ¥{total_cost:.4f}",
+    ]
+    return "\n".join(lines)
+
+# ======================================================================
+#  API 客户端（模块级缓存）
+# ======================================================================
+
+_deepseek_client = None
+
+def get_deepseek_client():
+    global _deepseek_client
+    if _deepseek_client is None:
+        key = os.environ.get("DEEPSEEK_API_KEY", "")
+        _deepseek_client = OpenAI(api_key=key, base_url="https://api.deepseek.com")
+    return _deepseek_client
+
+def get_zhipu_key():
+    return os.environ.get("ZHIPU_API_KEY", "")
+
+# ======================================================================
+#  工具定义
+# ======================================================================
+
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "在互联网上搜索信息。遇到不确定的词汇、文化概念、专有名词时使用。"
+            "请用日语或中文关键词搜索。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词"
+                }
+            },
+            "required": ["query"],
+        },
+    }
+}
+
+OUTPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_review",
+        "description": (
+            "すべての審査が完了したら、この関数を呼び出して修正結果を提出してください。\n"
+            "lines配列の各要素は、入力された字幕の同じ位置の行に対応します。\n"
+            "修正が不要な行は原文のまま、修正した行は修正後のテキストを入れてください。\n"
+            "配列の長さは必ず入力された字幕の行数と一致させてください。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "各行の修正後テキスト。入力と同じ順序・同じ数であること。"
+                }
+            },
+            "required": ["lines"]
+        }
+    }
+}
+
+FUSION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_fusion",
+        "description": (
+            "2つの字幕を統合した結果を提出してください。\n"
+            "subtitles配列の各要素には、timecode（時間軸）とtext（字幕テキスト）を含めてください。\n"
+            "時間軸の形式は「HH:MM:SS,mmm --> HH:MM:SS,mmm」としてください。\n"
+            "番号は不要です（自動付与されます）。\n"
+            "片方のモデルにしか存在しない発話も必ず含めてください。\n"
+            "公式台本とWhisper出力が著しく不一致する場合\n"
+            "（別作品の台本・内容の交差なし・音声と台本の完全なミスマッチ等）、\n"
+            "subtitlesを空配列にし、errorフィールドに理由を日本語で記入してください。\n"
+            "ただし部分的不一致は修正対象であり、error報告の対象外とします。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subtitles": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "timecode": {
+                                "type": "string",
+                                "description": "時間軸（HH:MM:SS,mmm --> HH:MM:SS,mmm）"
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "字幕テキスト"
+                            }
+                        },
+                        "required": ["timecode", "text"]
+                    }
+                },
+                "error": {
+                    "type": "string",
+                    "description": "公式台本とWhisper出力が著しく不一致する場合の理由。subtitlesが空のときのみ使用。"
+                }
+            },
+            "required": []
+        }
+    }
+}
+
+# ======================================================================
+#  智谱搜索（带缓存）
+# ======================================================================
+
+def _normalize_query(query):
+    return ' '.join(query.strip().lower().split())
+
+def zhipu_search(query):
+    global _search_cache, _search_cache_hits, _search_cache_misses, _usage
+    normalized = _normalize_query(query)
+    if not normalized:
+        return "搜索关键词为空"
+    cache_key = hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    if cache_key in _search_cache:
+        _search_cache_hits += 1
+        return _search_cache[cache_key] + " [缓存命中]"
+
+    # Bug #6 修复：先检查 Key，再计 miss
+    key = get_zhipu_key()
+    if not key:
+        return "搜索不可用：未配置 ZHIPU_API_KEY"
+
+    _search_cache_misses += 1
+    try:
+        zc = OpenAI(api_key=key, base_url="https://open.bigmodel.cn/api/paas/v4/")
+        resp = zc.chat.completions.create(
+            model="glm-4-flash",
+            messages=[
+                {"role": "system", "content": "搜索助手。用中文返回关键信息，不超过500字。"},
+                {"role": "user", "content": normalized}
+            ],
+            tools=[{"type": "web_search", "web_search": {"enable": True, "search_query": normalized}}],
+            temperature=0.1, max_tokens=4096,
+        )
+        c = resp.choices[0].message.content
+        result = c.strip() if c else "搜索未返回结果"
+    except Exception as e:
+        result = f"搜索失败: {e}"
+
+    # Bug #5 修复：不缓存错误结果
+    if not result.startswith("搜索失败"):
+        _search_cache[cache_key] = result
+    _usage["zhipu_calls"] += 1
+    return result
+
+# ======================================================================
+#  降级提取函数（从分析报告格式中提取 [N] 行）
+# ======================================================================
+
+def try_extract_lines_from_analysis(raw_response, expected_count):
+    """当 AI 输出分析报告而非纯文本行时，尝试从中提取 [N] 开头的行。"""
+    pattern = re.findall(
+        r'^[\[（(](\d+)[\]）)]\s*(.+?)$',
+        raw_response, re.MULTILINE
+    )
+    if not pattern:
+        return None
+    extracted = {}
+    for idx_str, text in pattern:
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            continue
+        text = re.sub(r'[（(][^)）]*[)）]\s*$', '', text).strip()
+        text = re.sub(r'（[^）]*）', '', text).strip()
+        text = re.sub(r'^\[\d+\]\s*', '', text).strip()
+        if text:
+            extracted[idx] = text
+    if len(extracted) < expected_count * 0.5:
+        return None
+    result = []
+    for i in range(1, expected_count + 1):
+        result.append(extracted.get(i, ""))
+    return result
+
+# ======================================================================
+#  三层兜底解析
+# ======================================================================
+
+def parse_review_result(result, expected_count, original_texts,
+                        per_line_retry_fn=None, verbose=True,
+                        log_prefix=""):
+    if result is None:
+        if verbose:
+            print(f"{log_prefix}❌ 失败，保留原文")
+        return list(original_texts), 0
+
+    parts = result.split("---SPLIT---")
+    parts = [p.strip() for p in parts]
+    parts = [p for p in parts if p]
+
+    if len(parts) == expected_count:
+        changed = sum(1 for o, n in zip(original_texts, parts) if o.strip() != n.strip())
+        if verbose:
+            print(f"{log_prefix}✅（{changed} 条修改）")
+        return parts, 1
+
+    if verbose:
+        print(f"{log_prefix}⚠ 件数不一致（{len(parts)}/{expected_count}），降级提取...")
+    fallback = try_extract_lines_from_analysis(result, expected_count)
+    if fallback:
+        result_list = []
+        changed = 0
+        for orig, fb in zip(original_texts, fallback):
+            text = fb.strip() if fb else orig
+            result_list.append(text)
+            if orig.strip() != text:
+                changed += 1
+        if verbose:
+            print(f"{log_prefix}   ✅ 降级成功（{changed} 条修改）")
+        return result_list, 2
+
+    if per_line_retry_fn:
+        if verbose:
+            print(f"{log_prefix}   ❌ 降级失败，逐条重试...")
+        result_list = []
+        for i in range(expected_count):
+            single = per_line_retry_fn(i)
+            if single and single.strip():
+                result_list.append(single.strip())
+            else:
+                result_list.append(original_texts[i])
+            time.sleep(0.15)
+        if verbose:
+            print(f"{log_prefix}   ✅ 逐条重试完成")
+        return result_list, 3
+    else:
+        if verbose:
+            print(f"{log_prefix}   ❌ 降级失败，保留原文")
+        return list(original_texts), 0
+
+# ======================================================================
+#  DeepSeek 统一入口
+# ======================================================================
+
+def _default_output_parser(args):
+    """OUTPUT_TOOL 默认解析器：提取 lines 并用 ---SPLIT--- 连接"""
+    lines = args.get("lines", [])
+    return "\n---SPLIT---\n".join(lines) if lines else None
+
+def call_deepseek(client, system_prompt, user_content,
+                  retries=3, verbose=True,
+                  enable_search=False, max_search_rounds=3,
+                  output_tool=None,
+                  output_tool_parser=None,
+                  stream=False,
+                  log_prefix="",
+                  show_reasoning=False):
+    """
+    统一 DeepSeek API 调用入口。
+
+    参数:
+        output_tool: 结构化输出工具定义 (OUTPUT_TOOL / CORRECTION_TOOL 等)
+        output_tool_parser: 从工具参数中提取结果的函数 (args_dict) -> result
+                            返回 None 表示解析失败，回退到纯文本
+        stream: 是否使用流式输出
+        enable_search: 是否启用联网搜索
+    """
+    if enable_search and not get_zhipu_key():
+        if verbose:
+            print("  ⚠ 未配置 ZHIPU_API_KEY，关闭搜索")
+        enable_search = False
+
+    if stream:
+        return _call_streaming(
+            client, system_prompt, user_content, retries, verbose,
+            log_prefix, show_reasoning
+        )
+
+    if output_tool and output_tool_parser is None:
+        output_tool_parser = _default_output_parser
+
+    return _call_non_streaming(
+        client, system_prompt, user_content, retries, verbose,
+        output_tool, output_tool_parser,
+        enable_search, max_search_rounds,
+        log_prefix, show_reasoning
+    )
+
+# ======================================================================
+#  路径: 纯流式
+# ======================================================================
+
+def _call_streaming(client, system_prompt, user_content, retries, verbose,
+                    log_prefix="", show_reasoning=False):
+    global _usage
+    for attempt in range(retries):
+        try:
+            resp = client.chat.completions.create(
+                model="deepseek-v4-pro",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.25, max_tokens=131072, stream=True,
+                stream_options={"include_usage": True},
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": 65536}}
+            )
+            reasoning_parts, content_parts = [], []
+            usage_recorded = False
+            for chunk in resp:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta is None:
+                        continue
+                    r = getattr(delta, 'reasoning_content', None) or ''
+                    if r:
+                        reasoning_parts.append(r)
+                    c = getattr(delta, 'content', None) or ''
+                    if c:
+                        content_parts.append(c)
+                # usage 只在最后一个 chunk 中非 null，用 flag 防止重复计数
+                if not usage_recorded and hasattr(chunk, 'usage') and chunk.usage:
+                    _add_usage(chunk.usage)
+                    usage_recorded = True
+            _usage["deepseek_calls"] += 1
+            rt = ''.join(reasoning_parts)
+            fc = ''.join(content_parts)
+            if verbose:
+                if show_reasoning and rt:
+                    print(f"{log_prefix}🧠 思考（{len(rt)} 字符）")
+                if fc:
+                    print(f"{log_prefix}📝 回答（{len(fc)} 字符）")
+                elif rt:
+                    print(f"{log_prefix}⚠ 回答为空！可能 max_tokens 不够")
+            return fc
+        except Exception as e:
+            print(f"{log_prefix}⚠ API 错误 (第{attempt+1}次): {e}")
+            time.sleep(3)
+    return None
+
+# ======================================================================
+#  路径: 非流式（统一结构化输出 + 搜索 + 自动重试）
+# ======================================================================
+
+def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
+                        output_tool=None, output_tool_parser=None,
+                        enable_search=False, max_search_rounds=3,
+                        log_prefix="", show_reasoning=False):
+    global _usage
+    cache_before_hits = _search_cache_hits
+
+    tools = []
+    if enable_search:
+        tools.append(SEARCH_TOOL)
+    if output_tool:
+        tools.append(output_tool)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content}
+    ]
+    search_count = 0
+    tool_call_count = 0
+
+    num_rounds = max_search_rounds + 1 if enable_search else 1
+
+    # Bug #9 修复：显式初始化 msg
+    msg = None
+
+    for round_idx in range(num_rounds):
+        if verbose and round_idx > 0:
+            hits_this_session = _search_cache_hits - cache_before_hits
+            print(f"{log_prefix}🔄 第 {round_idx} 轮推理（搜索 {search_count} 次，缓存命中 {hits_this_session} 次）")
+
+        # Bug #3 修复：最后一轮只移除搜索工具，保留 output_tool
+        round_tools = None
+        if tools:
+            if enable_search and round_idx >= max_search_rounds:
+                # 最后一轮：只保留 output_tool，移除搜索工具
+                round_tools = [output_tool] if output_tool else None
+            else:
+                round_tools = tools
+
+        resp = None
+        for attempt in range(retries):
+            try:
+                resp = client.chat.completions.create(
+                    model="deepseek-v4-pro",
+                    messages=messages,
+                    tools=round_tools,
+                    temperature=0.25, max_tokens=131072, stream=False,
+                    extra_body={"thinking": {"type": "enabled", "budget_tokens": 65536}}
+                )
+                _usage["deepseek_calls"] += 1
+                if hasattr(resp, 'usage') and resp.usage:
+                    _add_usage(resp.usage)
+                break
+            except Exception as e:
+                print(f"{log_prefix}⚠ API 错误 (第{attempt+1}次): {e}")
+                time.sleep(3)
+
+        if resp is None:
+            return None
+
+        msg = resp.choices[0].message
+        reasoning = getattr(msg, 'reasoning_content', None) or ''
+        if verbose and show_reasoning and reasoning:
+            print(f"{log_prefix}🧠 思维链 第{round_idx+1}轮（{len(reasoning)} 字符）")
+
+        # ------ 检查输出工具调用 ------
+        if msg.tool_calls and output_tool:
+            for tc in msg.tool_calls:
+                if tc.function.name == output_tool["function"]["name"]:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        parsed = output_tool_parser(args)
+                    except Exception:
+                        parsed = None
+                    if parsed is not None:
+                        if verbose:
+                            tool_name = output_tool["function"]["name"]
+                            if isinstance(parsed, str):
+                                parts_count = len([p for p in parsed.split("---SPLIT---") if p.strip()]) if parsed else 0
+                                print(f"{log_prefix}📝 {tool_name} → {parts_count} 条")
+                            elif isinstance(parsed, list):
+                                if len(parsed) == 0:
+                                    print(f"{log_prefix}📝 {tool_name} → 无需修改")
+                                else:
+                                    print(f"{log_prefix}📝 {tool_name} → {len(parsed)} 条修正")
+                            hits_this_session = _search_cache_hits - cache_before_hits
+                            if tool_call_count > 0:
+                                print(f"{log_prefix}📊 搜索：请求 {tool_call_count} 次，实际 {search_count} 次，缓存命中 {hits_this_session} 次")
+                        return parsed
+
+        # ------ 判断是否有搜索调用 ------
+        has_search = (
+            msg.tool_calls
+            and enable_search
+            and round_idx < max_search_rounds
+            and any(tc.function.name == "web_search" for tc in msg.tool_calls)
+        )
+
+        if has_search:
+            search_tool_calls = [
+                tc for tc in msg.tool_calls
+                if tc.function.name == "web_search"
+            ]
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in search_tool_calls
+                ]
+            })
+            for tc in msg.tool_calls:
+                if tc.function.name == "web_search":
+                    tool_call_count += 1
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        query = args.get("query", "")
+                    except json.JSONDecodeError:
+                        query = tc.function.arguments.strip()
+                    if verbose:
+                        print(f"{log_prefix}🔍 搜索：\"{query}\"")
+                    cache_before = _search_cache_hits
+                    result = zhipu_search(query)
+                    cache_after = _search_cache_hits
+                    if cache_after > cache_before:
+                        if verbose:
+                            print(f"{log_prefix}   💾 缓存命中")
+                    else:
+                        search_count += 1
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+        else:
+            content = msg.content or ""
+
+            # Bug #7 修复：空内容重试前先更新 messages
+            if not content:
+                if verbose:
+                    print(f"{log_prefix}⚡ content 为空，自动重试（极简思考）...")
+
+                # 将空响应加入 messages 上下文
+                if msg.tool_calls:
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {"id": tc.id, "type": "function",
+                             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                            for tc in msg.tool_calls
+                        ]
+                    })
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg.content or ""
+                    })
+
+                try:
+                    resp2 = client.chat.completions.create(
+                        model="deepseek-v4-pro",
+                        messages=messages,
+                        tools=round_tools,
+                        temperature=0.25, max_tokens=131072, stream=False,
+                        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}}
+                    )
+                    _usage["deepseek_calls"] += 1
+                    if hasattr(resp2, 'usage') and resp2.usage:
+                        _add_usage(resp2.usage)
+                    msg2 = resp2.choices[0].message
+
+                    if msg2.tool_calls and output_tool:
+                        for tc in msg2.tool_calls:
+                            if tc.function.name == output_tool["function"]["name"]:
+                                try:
+                                    args = json.loads(tc.function.arguments)
+                                except json.JSONDecodeError:
+                                    args = {}
+                                try:
+                                    parsed = output_tool_parser(args)
+                                except Exception:
+                                    parsed = None
+                                if parsed is not None:
+                                    if verbose:
+                                        tool_name = output_tool["function"]["name"]
+                                        if isinstance(parsed, str):
+                                            print(f"{log_prefix}   ✅ 重试成功 → {tool_name}")
+                                        elif isinstance(parsed, list):
+                                            print(f"{log_prefix}   ✅ 重试成功 → {tool_name} {len(parsed)} 条")
+                                    return parsed
+
+                    content2 = msg2.content or ""
+                    if content2:
+                        if verbose:
+                            print(f"{log_prefix}   ✅ 重试成功（{len(content2)} 字符）")
+                        return content2
+                except Exception as e:
+                    if verbose:
+                        print(f"{log_prefix}   ❌ 重试失败: {e}")
+
+            if verbose:
+                content_len = len(content)
+                if output_tool:
+                    print(f"{log_prefix}⚠ 未调用 {output_tool['function']['name']}，回退纯文本（{content_len} 字符）")
+                else:
+                    print(f"{log_prefix}📝 最终回答（{content_len} 字符）")
+
+            hits_this_session = _search_cache_hits - cache_before_hits
+            if verbose and tool_call_count > 0:
+                print(f"{log_prefix}📊 搜索：请求 {tool_call_count} 次，实际 {search_count} 次，缓存命中 {hits_this_session} 次")
+
+            return content
+
+    print(f"{log_prefix}⚠ 达到最大搜索轮数（{max_search_rounds}），强制输出")
+    return msg.content if msg and hasattr(msg, 'content') else ""
+
+# ======================================================================
+#  SRT 工具函数
+# ======================================================================
+
+def extract_srt_from_response(response_text):
+    m = re.search(r'```(?:srt|subtitles)?\s*\n(.*?)\n\s*```', response_text, re.DOTALL)
+    if m and '-->' in m.group(1): return m.group(1).strip()
+    m = re.search(r'```(?:srt)?\s*\n(.*?)$', response_text, re.DOTALL)
+    if m and '-->' in m.group(1): return m.group(1).strip()
+    m = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}', response_text)
+    if m:
+        start = m.start()
+        ls = response_text.rfind('\n', 0, start)
+        if ls == -1: ls = 0
+        pb = response_text.rfind('\n\n', 0, ls)
+        if pb != -1 and pb > ls - 50: ls = pb + 2
+        candidate = response_text[ls:].strip()
+        if '-->' in candidate: return candidate
+    return response_text.strip()
+
+def format_timestamp(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def read_text_file(path):
+    """尝试多种编码读取文本文件（UTF-8 优先，兼容 Shift-JIS/cp932/euc-jp）。
+    V3.2 新增：用于读取发行商提供的日语台本（多为 Shift-JIS 编码）。"""
+    encodings = ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis', 'euc-jp']
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                content = f.read()
+            # 校验：替换字符占比 < 1% 才视为解码成功
+            if content.count('\ufffd') < len(content) * 0.01:
+                return content
+        except UnicodeDecodeError:
+            continue
+    # 全部失败则用 utf-8 忽略错误
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+def parse_srt(filepath):
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    raw_blocks = re.split(r'\n\n+', content.strip())
+    subs = []
+    for i, block in enumerate(raw_blocks, start=1):
+        lines = block.strip().split('\n')
+        if not lines:
+            continue
+        # 检查第一行是否是序号
+        if re.match(r'^\d+$', lines[0]):
+            # 标准格式：序号、时间轴、文本
+            if len(lines) >= 3:
+                ts_match = re.match(
+                    r'(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})',
+                    lines[1]
+                )
+                if ts_match:
+                    subs.append({
+                        "index": int(lines[0]),
+                        "start": ts_match.group(1),
+                        "end": ts_match.group(2),
+                        "text": '\n'.join(lines[2:]).strip().replace('\n', ' ')
+                    })
+        else:
+            # 无序号：第一行是时间轴
+            ts_match = re.match(
+                r'(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})',
+                lines[0]
+            )
+            if ts_match:
+                subs.append({
+                    "index": i,
+                    "start": ts_match.group(1),
+                    "end": ts_match.group(2),
+                    "text": '\n'.join(lines[1:]).strip().replace('\n', ' ')
+                })
+    # Bug #1, #2 修复：return 移到循环外，两个分支都能走到
+    return subs
+
+def parse_srt_full(filepath):
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    raw_blocks = re.split(r'\n\n+', content.strip())
+    subs = []
+    for block in raw_blocks:
+        lines = block.strip().split('\n')
+        # Bug #8 修复：len(lines) >= 4 已保证 lines[3] 存在，无需再判断
+        if len(lines) >= 4:
+            subs.append({
+                "index": int(lines[0]),
+                "timecode": lines[1],
+                "text_ja": lines[2],
+                "text_zh": '\n'.join(lines[3:]).strip(),
+            })
+    return subs, content
