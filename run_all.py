@@ -9,14 +9,24 @@ import subprocess
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("LOG_FILE", os.path.join(_SCRIPT_DIR, "output", "pipeline.log"))
 
+# 加载 .env 文件（不依赖 python-dotenv，避免引入新依赖）
+_env_file = os.path.join(_SCRIPT_DIR, ".env")
+if os.path.exists(_env_file):
+    with open(_env_file, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
 import common  # 触发日志初始化
 
 # ============================================================
 #  配置区
 # ============================================================
 
-DEEPSEEK_API_KEY = "your-deepseek-api-key-here"
-ZHIPU_API_KEY = "your-zhipu-api-key-here"
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
 
 AUDIO_DIR = "./audio"
 OUTPUT_DIR = "./output"
@@ -31,6 +41,15 @@ STEP0_MATCH_SCRIPTS = False       # STEP0 开关
 SCRIPT_DIR = "./scripts"          # 台本目录
 SCRIPT_FALLBACK_FULL = True       # 合并台本无法拆分时整本发送
 SCRIPT_FORCE_RESPLIT = False      # 强制重新拆分（忽略缓存）
+
+# Whisper 转写优化（V3.4 新增）
+ENABLE_AUDIO_PREPROCESS = True    # 音频预处理（降噪+归一化+高通滤波）
+INITIAL_PROMPT = "ASMR作品、囁き、耳かき、癒し系、日本語、優しい声"
+HOTWORDS = "触手,媚薬,絶頂,雌,自縛,おまんこ,クリトリス,チンチン,囁き,耳舐め,サキュバス,乳首,睾丸,愛液,潮吹き"
+VAD_THRESHOLD = 0.2               # VAD 语音检测阈值（越低越敏感）
+VAD_MIN_SPEECH_MS = 50            # 最短语音段（ms）
+VAD_SPEECH_PAD_MS = 800           # 语音前后缓冲（ms）
+VAD_MIN_SILENCE_MS = 500          # 触发分割的最短静音（ms）
 
 # 流水线步骤开关
 STEP0_MATCH_SCRIPTS = STEP0_MATCH_SCRIPTS and ENABLE_SCRIPT
@@ -75,6 +94,13 @@ def get_env():
     env["SCRIPT_DIR"] = SCRIPT_DIR
     env["SCRIPT_FALLBACK_FULL"] = "1" if SCRIPT_FALLBACK_FULL else "0"
     env["SCRIPT_FORCE_RESPLIT"] = "1" if SCRIPT_FORCE_RESPLIT else "0"
+    env["ENABLE_AUDIO_PREPROCESS"] = "1" if ENABLE_AUDIO_PREPROCESS else "0"
+    env["INITIAL_PROMPT"] = INITIAL_PROMPT
+    env["HOTWORDS"] = HOTWORDS
+    env["VAD_THRESHOLD"] = str(VAD_THRESHOLD)
+    env["VAD_MIN_SPEECH_MS"] = str(VAD_MIN_SPEECH_MS)
+    env["VAD_SPEECH_PAD_MS"] = str(VAD_SPEECH_PAD_MS)
+    env["VAD_MIN_SILENCE_MS"] = str(VAD_MIN_SILENCE_MS)
     return env
 
 

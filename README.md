@@ -1,10 +1,14 @@
-# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.3）
+# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.4.1）
 
 ## 这是什么？
 
 一套全自动工具，把你手头的日语 ASMR 音频（mp3/m4a/wav/flac 等）变成中日双语字幕。
 
 工作流程：音频 → Whisper 双模型转写日文字幕 → AI 审校日语错误 → 结合上下文审查可能的识别错误 → 翻译成中文 → AI 逐段审校翻译 → AI 全篇终审（宏观+微观） → 自动化规则验证 → 双语字幕 .srt 文件。
+
+V3.4.1 的主要更新：API Key 安全加固——run_all.py 中的 DEEPSEEK_API_KEY 和 ZHIPU_API_KEY 从硬编码改为通过环境变量读取，避免源码泄露风险；项目根目录新增 .env 文件（已被 .gitignore 忽略）存放真实 Key，run_all.py 启动时自动加载（手动解析，未引入 python-dotenv 依赖）；新增 .env.example 作为模板提交到仓库，其他用户克隆后复制为 .env 填入 Key 即可；移除 run_all.py 的 git skip-worktree 保护标记（代码已无敏感信息，可直接提交）。已设置的系统环境变量优先于 .env 文件。
+
+V3.4 的主要更新：Whisper 转写准确率改进——新增音频预处理模块（librosa 读取 + 80Hz 高通滤波去低频隆隆声 + noisereduce 稳态噪声抑制（保守强度）+ RMS 归一化（峰值限幅）），预处理结果缓存为 *_preprocessed.wav 支持断点续跑；VAD 参数针对 ASMR 耳语场景调优（threshold 0.3→0.2、min_speech_duration_ms 100→50、speech_pad_ms 600→800）并通过环境变量暴露供用户覆盖；新增 initial_prompt 引导（默认 ASMR 通用日语 prompt，可在 run_all.py 覆盖为具体作品术语）；新增 hotwords 热词支持（faster-whisper 1.2.1 特性，传入角色名/专有名词提升识别率）；所有新参数集中在 run_all.py 配置区。预处理对稳态底噪、雨声等有效，对背景音乐干扰效果有限（需人声分离，见开发者文档 Phase 2）。
 
 V3.3 的主要更新：台本模式效率优化——有台本时跳过 Turbo 转写（仅用 V3 提供时间轴 + 台本作为权威文本），融合 prompt 简化；台本与 Whisper 严重不匹配时不再终止流水线，改为自动回退到无台本模式（补跑 Turbo + V3+Turbo 融合）并记录至 script_mismatch.json；日语二审（STEP2）在台本模式下默认跳过，仅当存在 mismatch 时触发，且仅审校 mismatch 文件；translate.py 输入逻辑改为以 *_ensemble.srt 为基础，*_reviewed.srt 存在则优先使用否则回退到 *_ensemble.srt，使 STEP2 跳过时 STEP3 仍可正常运行；match_scripts.py 新增 LLM 文件名匹配阶段（正则失败后由 LLM 判定 match/split/none）与合并台本检测（单一台本被多音频命中时自动转为待拆分）；幂等检查扩展（音频文件列表/修改时间变化、台本列表变化均触发重新匹配）；track 标识符支持 1A/1B 等数字+字母组合；validate_final.py 移除假名残留检查。
 
@@ -88,10 +92,15 @@ pip install faster-whisper openai
 
 ### 3.4 配置 API Keys
 
-用文本编辑器打开 run_all.py，修改顶部配置区的 API Keys：
+项目根目录下有一个 `.env.example` 模板文件。复制它为 `.env` 并填入你的 API Key：
 
-DEEPSEEK_API_KEY = "your-deepseek-api-key-here"
-ZHIPU_API_KEY = "your-zhipu-api-key-here"    # 不需要搜索则留空 ""
+```
+DEEPSEEK_API_KEY=sk-你的deepseek密钥
+ZHIPU_API_KEY=你的智谱密钥
+```
+
+`.env` 文件已在 `.gitignore` 中，不会被提交到 git。run_all.py 启动时会自动加载 `.env`（V3.4.1 起，无需修改任何 .py 文件）。如果已设置系统环境变量 `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`，则优先使用系统环境变量。
+
 ENABLE_SEARCH 设为 True 开启联网搜索，False 关闭。处理 NSFW 内容时建议设为 False。
 
 V3.0 起无需修改 common.py，所有配置只需在 run_all.py 顶部一处完成。
@@ -160,6 +169,27 @@ REVIEW_JP_FULL_REVIEW_BATCH = 200     # 全篇审校每批最大条数
 TRANSLATE_BATCH_SIZE = 10             # 翻译阶段每批条数
 TRANSLATE_REVIEW_BATCH_SIZE = 20      # 翻译审校阶段每批条数
 
+## 5.4 Whisper 转写优化（V3.4 新增）
+
+针对 ASMR 音频特征（耳语低音量、气声多、停顿长、背景音干扰）的转写参数与预处理：
+
+ENABLE_AUDIO_PREPROCESS = True    # 音频预处理开关。开启后转写前先降噪+归一化+高通滤波
+INITIAL_PROMPT = "ASMR作品、囁き、耳かき、癒し系、日本語、優しい声"  # 通用 ASMR prompt，可改为具体作品术语
+HOTWORDS = ""                     # 逗号分隔热词，如 "佐倉綾音,媚薬,触手"，提升专有名词识别率
+VAD_THRESHOLD = 0.2               # VAD 语音检测阈值（0-1，越低越敏感）
+VAD_MIN_SPEECH_MS = 50            # 最短语音段（ms），过短会被丢弃
+VAD_SPEECH_PAD_MS = 800           # 语音前后缓冲（ms），避免削头去尾
+VAD_MIN_SILENCE_MS = 500          # 触发分割的最短静音（ms）
+
+预处理流程：librosa 读取 16kHz 单声道 → 80Hz 高通滤波去低频隆隆声 → noisereduce 稳态噪声抑制 → RMS 归一化到 -20dBFS（峰值限幅 0.95 避免削波）→ 输出 *_preprocessed.wav 缓存。预处理文件存在则跳过（支持断点续跑）。
+
+调优建议：
+- 背景底噪/雨声明显时，ENABLE_AUDIO_PREPROCESS=True 收效显著
+- 作品有特定术语时，将 INITIAL_PROMPT 改为含角色名/题材的短句（如 "妖狐、神社、狐耳、甘えん坊"）
+- 反复出现的专有名词识别错误，填入 HOTWORDS（逗号分隔）
+- VAD_THRESHOLD 过低（<0.15）会产生大量碎片化假阳性，过高（>0.4）会漏掉耳语
+- 背景音乐干扰严重时，预处理效果有限，需考虑人声分离（见开发者文档 Phase 2）
+
 ## 5.2 纯中文字幕
 
 如果想要纯中文字幕（不要日语原文），在 run_all.py 中把 STEP6_STRIP 设为 True。流水线会自动从 _final.srt 中去除日文行，输出 _cn_only.srt。
@@ -210,7 +240,7 @@ SCRIPT_DIR = "./scripts"         # 台本所在目录
 
 ## 流水线各步骤详解
 
-第一步 ensemble_transcribe.py 用 Whisper large-v3 和 large-v3-turbo 两个模型分别转写同一份音频。large-v3 日语识别精度最高但偶尔漏短句，large-v3-turbo 速度快约八倍且 VAD 切分更密集，能捕捉到 V3 漏掉的短片段。V3.1 起脚本分为两个阶段执行：阶段1串行处理所有音频文件的双模型转写（GPU 独占，避免显存争用），Whisper 模型在处理多个音频文件时只加载一次，后续文件复用已加载的模型实例；阶段2用 ThreadPoolExecutor 并行调用 DeepSeek 对所有文件的两份 SRT 进行逐条比对融合（并发数由 MAX_WORKERS 控制）。V3.3 起台本模式优化：有台本的音频在阶段1跳过 Turbo（仅跑 V3），阶段2采用简化的 V3+台本融合 prompt（不再对比 V3 与 Turbo），节省约一半 GPU 转写时间。若融合阶段 AI 检测到台本与 Whisper 严重不匹配，自动补跑 Turbo 并回退到 V3+Turbo 融合（原 prompt），mismatch 文件记录到 script_mismatch.json 供下游 STEP2 选择性触发。无台本模式下行为与 V3.2 完全一致。融合逻辑：时间轴接近的条目视为同一段语音，AI 选择两个版本中语法更正确、上下文更通顺的一方；只有某一方能捕捉到的条目，如果确实是自然的日语表达就保留。融合提示词明确要求 AI 不得省略或丢弃仅在一个模型中存在的内容，即使片段化也必须保留。V3.0 起融合阶段改用 submit_fusion 工具进行 Function Calling 结构化输出，格式可靠性大幅提升，纯文本回退仍保留作为兜底。双模型融合可消除单模型约百分之三十的个体偏差。两阶段分离后，转写阶段仍是串行瓶颈（GPU 独占），但融合阶段的网络等待被并发摊薄，多文件场景下 ensemble 总耗时缩短约 20%。
+第一步 ensemble_transcribe.py 用 Whisper large-v3 和 large-v3-turbo 两个模型分别转写同一份音频。large-v3 日语识别精度最高但偶尔漏短句，large-v3-turbo 速度快约八倍且 VAD 切分更密集，能捕捉到 V3 漏掉的短片段。V3.1 起脚本分为两个阶段执行：阶段1串行处理所有音频文件的双模型转写（GPU 独占，避免显存争用），Whisper 模型在处理多个音频文件时只加载一次，后续文件复用已加载的模型实例；阶段2用 ThreadPoolExecutor 并行调用 DeepSeek 对所有文件的两份 SRT 进行逐条比对融合（并发数由 MAX_WORKERS 控制）。V3.3 起台本模式优化：有台本的音频在阶段1跳过 Turbo（仅跑 V3），阶段2采用简化的 V3+台本融合 prompt（不再对比 V3 与 Turbo），节省约一半 GPU 转写时间。若融合阶段 AI 检测到台本与 Whisper 严重不匹配，自动补跑 Turbo 并回退到 V3+Turbo 融合（原 prompt），mismatch 文件记录到 script_mismatch.json 供下游 STEP2 选择性触发。无台本模式下行为与 V3.2 完全一致。V3.4 起转写前新增音频预处理（librosa 读取 + 80Hz 高通滤波 + noisereduce 降噪 + 归一化，缓存为 *_preprocessed.wav），VAD 参数针对 ASMR 耳语调优（threshold 0.2、min_speech 50ms、speech_pad 800ms）并通过环境变量暴露，新增 initial_prompt 引导与 hotwords 热词支持提升专有名词识别率。融合逻辑：时间轴接近的条目视为同一段语音，AI 选择两个版本中语法更正确、上下文更通顺的一方；只有某一方能捕捉到的条目，如果确实是自然的日语表达就保留。融合提示词明确要求 AI 不得省略或丢弃仅在一个模型中存在的内容，即使片段化也必须保留。V3.0 起融合阶段改用 submit_fusion 工具进行 Function Calling 结构化输出，格式可靠性大幅提升，纯文本回退仍保留作为兜底。双模型融合可消除单模型约百分之三十的个体偏差。两阶段分离后，转写阶段仍是串行瓶颈（GPU 独占），但融合阶段的网络等待被并发摊薄，多文件场景下 ensemble 总耗时缩短约 20%。
 
 第二步 review_japanese.py 分为两个阶段。阶段一是逐批审校：读取融合后的日语字幕，按每 30 条一组发送给 DeepSeek，让 AI 修正同音异义词、助词错误、气息误判和不自然的断句。相邻组之间有 5 条重叠以消除上下文断裂。系统提示词中包含了成人向内容的类型提示（催淫、媚药、触手等），以及低品质音频误识别的检测指引，帮助 AI 在局部上下文中识别 Whisper 的典型误听模式。无法识别的内容统一标记为「〔認識不良〕」以便后续人工复查。阶段二是全篇上下文审校：在所有批次处理完成后，将全篇日语字幕打包发送给 AI，让 AI 利用完整的作品世界观和术语一致性来修正逐批审校无法发现的同音词误判。V3.0 起两个阶段均支持跨文件并行处理，多个文件的批次同时发送 API 请求。全篇上下文审校的输出通过 submit_review 工具以保证格式可靠，同样享受三层兜底保护。V3.3 起在台本模式下该步骤默认跳过（台本即权威文本无需审校），仅当 STEP1 产出 script_mismatch.json 且非空时触发，且仅审校 mismatch 文件（自动回退为 V3+Turbo 融合的产物）。无台本模式下行为与 V3.2 完全一致。
 
@@ -309,12 +339,14 @@ V3.1 并行处理（MAX_WORKERS=10）：
 - [DeepSeek](https://platform.deepseek.com) — 提供 DeepSeek-V4-Pro 大语言模型 API，用于翻译、审校和终审
 - [智谱 AI](https://open.bigmodel.cn) — 提供 GLM-4-Flash 模型 API，用于可选的联网搜索功能
 - [FFmpeg](https://ffmpeg.org) — 音视频解码，Whisper 读取音频的底层依赖
+- [librosa](https://librosa.org) — 音频分析库，用于音频预处理中的重采样与响度归一化（ISC 协议）
+- [noisereduce](https://github.com/timsainb/noisereduce) — 稳态噪声抑制算法，用于音频预处理中的降噪（MIT 协议）
 
 ---
 
 ## AI 参与说明
 
-本项目的所有 Python 脚本和文档初稿均由 deepseek-v4-pro(V2.0及以前)和GLM-5.2(V3.0至V3.3)根据人类作者的设计要求生成。人类作者负责：定义项目目标和应用场景、选定技术路线和架构方案、确定所有关键参数、测试和验证输出质量、以及做出发布和许可证决策
+本项目的所有 Python 脚本和文档初稿均由 deepseek-v4-pro(V2.0及以前)和GLM-5.2(V3.0至V3.4.1)根据人类作者的设计要求生成。人类作者负责：定义项目目标和应用场景、选定技术路线和架构方案、确定所有关键参数、测试和验证输出质量、以及做出发布和许可证决策
 
 ---
 

@@ -1,2 +1,6 @@
 faster-whisper>=1.0.0
 openai>=1.0.0
+librosa>=0.10.0
+noisereduce>=3.0.0
+scipy>=1.11.0
+soundfile>=0.12.0

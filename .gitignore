@@ -17,6 +17,9 @@ __pycache__/
 # 环境变量
 .env
 
+# IDE
+.vscode/
+
 # 系统文件
 Thumbs.db
 .DS_Store

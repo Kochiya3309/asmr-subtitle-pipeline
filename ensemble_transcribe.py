@@ -25,6 +25,15 @@ SCRIPT_MAPPING_FILE = os.path.join(OUTPUT_DIR, "script_mapping.json")
 SCRIPT_VERIFIED_FILE = os.path.join(OUTPUT_DIR, "script_mapping.verified")
 MISMATCH_FILE = os.path.join(OUTPUT_DIR, "script_mismatch.json")
 # =================================
+# ====== 转写优化（V3.4 新增）======
+ENABLE_AUDIO_PREPROCESS = os.environ.get("ENABLE_AUDIO_PREPROCESS", "1") == "1"
+INITIAL_PROMPT = os.environ.get("INITIAL_PROMPT", "")
+HOTWORDS = os.environ.get("HOTWORDS", "")
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.2"))
+VAD_MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "50"))
+VAD_SPEECH_PAD_MS = int(os.environ.get("VAD_SPEECH_PAD_MS", "800"))
+VAD_MIN_SILENCE_MS = int(os.environ.get("VAD_MIN_SILENCE_MS", "500"))
+# =================================
 
 # ====== mismatch 跟踪（线程安全集合）======
 _mismatch_files = set()
@@ -45,19 +54,69 @@ def get_whisper_model(model_name):
 # ===============================
 
 
+# ====== 音频预处理（V3.4 新增）======
+def preprocess_audio(input_path, output_path):
+    """音频预处理：降噪 + 高通滤波 + RMS归一化，输出 16kHz mono wav。
+    依赖 librosa / noisereduce / scipy / soundfile（惰性导入）。"""
+    import numpy as np
+    import librosa
+    import noisereduce as nr
+    from scipy.signal import butter, sosfilt
+    import soundfile as sf
+
+    print(f"    🎚 预处理中 ...")
+    y, sr = librosa.load(input_path, sr=16000, mono=True)
+    sr = int(sr)
+
+    # 高通滤波 80Hz（去除低频隆隆声）
+    sos = butter(4, 80, btype='highpass', fs=sr, output='sos')
+    y = sosfilt(sos, y)
+
+    # 稳态噪声抑制（保守强度，避免误伤 ASMR 轻声）
+    y = nr.reduce_noise(y=y, sr=sr, stationary=True, prop_decrease=0.7)
+
+    # RMS 归一化（-20dBFS 目标，gain 限幅避免峰值削波）
+    rms = np.sqrt(np.mean(y ** 2)) + 1e-8
+    target_rms = 0.1
+    gain = target_rms / rms
+    peak = np.max(np.abs(y))
+    gain = min(gain, 0.95 / peak)   # 不让峰值超 0.95
+    y = y * gain
+
+    sf.write(output_path, y, sr, subtype='PCM_16')
+    print(f"    ✅ 预处理 → {output_path}")
+# ===================================
+
+
 def transcribe_with_model(model_name, audio_path, output_srt):
     model = get_whisper_model(model_name)
-    print(f"    🎙 转写中 ...")
-    segments, _ = model.transcribe(
-        audio_path,
+
+    # V3.4：音频预处理（含缓存过期检测）
+    actual_audio = audio_path
+    if ENABLE_AUDIO_PREPROCESS:
+        base = os.path.splitext(os.path.basename(audio_path))[0]
+        preprocessed = os.path.join(OUTPUT_DIR, f"{base}_preprocessed.wav")
+        need_preprocess = True
+        if os.path.exists(preprocessed):
+            if os.path.getmtime(preprocessed) >= os.path.getmtime(audio_path):
+                print(f"    ⏭ 预处理文件已存在且未过期，跳过")
+                need_preprocess = False
+            else:
+                print(f"    ⚠ 源音频已更新，重新预处理")
+        if need_preprocess:
+            preprocess_audio(audio_path, preprocessed)
+        actual_audio = preprocessed
+
+    # V3.4：构建 transcribe 参数
+    transcribe_kwargs = dict(
         language="ja",
         beam_size=5,
         vad_filter=True,
         vad_parameters=dict(
-            min_silence_duration_ms=500,
-            threshold=0.3,              
-            min_speech_duration_ms=100,  
-            speech_pad_ms=600, 
+            min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+            threshold=VAD_THRESHOLD,
+            min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+            speech_pad_ms=VAD_SPEECH_PAD_MS,
         ),
         condition_on_previous_text=False,
         no_repeat_ngram_size=5,
@@ -66,6 +125,13 @@ def transcribe_with_model(model_name, audio_path, output_srt):
         compression_ratio_threshold=2.0,
         log_prob_threshold=-1.0,
     )
+    if INITIAL_PROMPT:
+        transcribe_kwargs["initial_prompt"] = INITIAL_PROMPT
+    if HOTWORDS:
+        transcribe_kwargs["hotwords"] = HOTWORDS
+
+    print(f"    🎙 转写中 ...")
+    segments, _ = model.transcribe(actual_audio, **transcribe_kwargs)
     with open(output_srt, "w", encoding="utf-8") as f:
         for i, seg in enumerate(segments, start=1):
             f.write(

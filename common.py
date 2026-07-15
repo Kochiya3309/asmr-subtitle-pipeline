@@ -15,6 +15,16 @@ from openai import OpenAI
 _original_print = builtins.print
 _log_fp = None
 
+def _logged_print(*args, **kwargs):
+    """模块级函数（非闭包），避免被赋给 builtins.print 后
+    被反射查找 getattr(common, '_logged_print') 时失败。"""
+    _original_print(*args, **kwargs)
+    if _log_fp is not None:
+        log_kwargs = {k: v for k, v in kwargs.items() if k not in ('file', 'flush')}
+        log_kwargs['file'] = _log_fp
+        log_kwargs['flush'] = True
+        _original_print(*args, **log_kwargs)
+
 def _init_logging():
     global _log_fp
     log_file = os.environ.get("LOG_FILE")
@@ -22,16 +32,6 @@ def _init_logging():
         log_dir = os.path.dirname(os.path.abspath(log_file))
         os.makedirs(log_dir, exist_ok=True)
         _log_fp = open(log_file, "a", encoding="utf-8")
-
-        def _logged_print(*args, **kwargs):
-            _original_print(*args, **kwargs)
-            # 过滤掉 file 和 flush，但只处理 kwargs 中的
-            # 如果有人用位置参数传 file，则不做特殊处理（极罕见）
-            log_kwargs = {k: v for k, v in kwargs.items() if k not in ('file', 'flush')}
-            log_kwargs['file'] = _log_fp
-            log_kwargs['flush'] = True
-            _original_print(*args, **log_kwargs)
-
         builtins.print = _logged_print
 
 _init_logging()
@@ -263,7 +263,7 @@ def zhipu_search(query):
                 {"role": "system", "content": "搜索助手。用中文返回关键信息，不超过500字。"},
                 {"role": "user", "content": normalized}
             ],
-            tools=[{"type": "web_search", "web_search": {"enable": True, "search_query": normalized}}],
+            tools=[{"type": "web_search", "web_search": {"enable": True, "search_query": normalized}}],  # type: ignore[arg-type]
             temperature=0.1, max_tokens=4096,
         )
         c = resp.choices[0].message.content
@@ -533,7 +533,7 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
             print(f"{log_prefix}🧠 思维链 第{round_idx+1}轮（{len(reasoning)} 字符）")
 
         # ------ 检查输出工具调用 ------
-        if msg.tool_calls and output_tool:
+        if msg.tool_calls and output_tool and output_tool_parser:
             for tc in msg.tool_calls:
                 if tc.function.name == output_tool["function"]["name"]:
                     try:
@@ -639,7 +639,7 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
                         _add_usage(resp2.usage)
                     msg2 = resp2.choices[0].message
 
-                    if msg2.tool_calls and output_tool:
+                    if msg2.tool_calls and output_tool and output_tool_parser:
                         for tc in msg2.tool_calls:
                             if tc.function.name == output_tool["function"]["name"]:
                                 try:
