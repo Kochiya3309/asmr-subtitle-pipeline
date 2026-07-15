@@ -341,6 +341,8 @@ V3.1 并行处理（MAX_WORKERS=10）：
 - [FFmpeg](https://ffmpeg.org) — 音视频解码，Whisper 读取音频的底层依赖
 - [librosa](https://librosa.org) — 音频分析库，用于音频预处理中的重采样与响度归一化（ISC 协议）
 - [noisereduce](https://github.com/timsainb/noisereduce) — 稳态噪声抑制算法，用于音频预处理中的降噪（MIT 协议）
+- [SciPy](https://scipy.org) — 科学计算库，用于音频预处理中的 Butterworth 高通滤波（BSD 协议）
+- [soundfile](https://python-soundfile.readthedocs.io) — 音频文件读写库，用于预处理结果的 wav 输出（BSD 协议）
 
 ---
 
