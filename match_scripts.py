@@ -123,6 +123,19 @@ def collect_audio_files():
     return files
 
 
+def _check_duplicate_bases(audio_files):
+    """检测去掉扩展名后重名的音频（如 foo.mp3 + foo.wav）。
+    重名会导致 mapping 键冲突（dict(zip) 静默覆盖），返回重复对列表。"""
+    seen, dups = {}, []
+    for af in audio_files:
+        b = os.path.splitext(os.path.basename(af))[0]
+        if b in seen:
+            dups.append((seen[b], af))
+        else:
+            seen[b] = af
+    return dups
+
+
 def collect_script_files():
     """收集台本文件，返回完整路径列表"""
     if not os.path.isdir(SCRIPT_DIR):
@@ -345,6 +358,16 @@ def main():
     audio_files = collect_audio_files()
     if not audio_files:
         print(f"❌ 在 {AUDIO_DIR} 中未找到音频文件！")
+        sys.exit(1)
+
+    # 修复：检测重名 base（如 foo.mp3 + foo.wav），重名会导致
+    # mapping 键冲突（dict(zip) 静默覆盖）。明确报错退出。
+    dups = _check_duplicate_bases(audio_files)
+    if dups:
+        print(f"❌ 检测到文件名冲突（去掉扩展名后重名）：")
+        for a, b in dups:
+            print(f"   • {os.path.basename(a)} 与 {os.path.basename(b)}")
+        print(f"   请重命名其中一个文件后重新运行。")
         sys.exit(1)
 
     script_files = collect_script_files()
@@ -603,6 +626,35 @@ def main():
                         }
                         unmatched.append(audio_name)
                         print(f"    ⚠ 拆分结果中 {audio_name} 为空，标记无台本")
+                # 修复：拆分结果中完全缺失的音频名也要处理（原逻辑只遍历
+                # segments 里出现过的名字，缺失的会残留 pending_split 状态）
+                missing = [n for n in group_audio_names if n not in segments]
+                for audio_name in missing:
+                    mapping[audio_name] = {
+                        "audio": audio_map[audio_name],
+                        "script_source": merge_path,
+                        "script_path": None,
+                        "split": False,
+                        "range": None,
+                        "fallback_full": False
+                    }
+                    unmatched.append(audio_name)
+                    print(f"    ⚠ 拆分结果缺失 {audio_name}，标记无台本")
+            else:
+                # 修复：正则与 LLM 拆分均失败时，原逻辑什么都不做，导致
+                # mapping 残留 pending_split 且用户无感知。现将整组标记
+                # 无台本并进入 unmatched，由阶段3 统一兜底处理。
+                print(f"    ❌ 拆分失败，该组 {len(group_audio_names)} 个音频标记无台本")
+                for audio_name in group_audio_names:
+                    mapping[audio_name] = {
+                        "audio": audio_map[audio_name],
+                        "script_source": merge_path,
+                        "script_path": None,
+                        "split": False,
+                        "range": None,
+                        "fallback_full": False
+                    }
+                    unmatched.append(audio_name)
 
     # ========== 阶段3：兜底处理 ==========
     if unmatched:
@@ -690,10 +742,17 @@ def main():
             print(f"  └─")
 
     print(f"\n  确认无误输入 y 继续，有问题输入 n 退出：", end="", flush=True)
-    try:
-        feedback = input().strip().lower()
-    except EOFError:
-        feedback = ""
+    if sys.stdin.isatty():
+        try:
+            feedback = input().strip().lower()
+        except EOFError:
+            feedback = ""
+    else:
+        # 修复：非交互式终端（计划任务/CI/管道）下 input() 会立即 EOFError，
+        # 原逻辑按验证不通过处理 → sys.exit(1) → run_all.py 流水线在 STEP0
+        # 必失败。改为自动通过并给出醒目警告（与 run_all.py 结尾风格一致）。
+        feedback = "y"
+        print("（非交互式终端，跳过人工验证，自动通过）", flush=True)
 
     if feedback == 'y':
         with open(VERIFIED_FILE, "w", encoding="utf-8") as f:

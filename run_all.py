@@ -19,6 +19,7 @@ if os.path.exists(_env_file):
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
+print("正在加载依赖库，请稍候（首次启动可能稍慢）...", flush=True)
 import common  # 触发日志初始化
 
 # ============================================================
@@ -26,10 +27,13 @@ import common  # 触发日志初始化
 # ============================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 
-AUDIO_DIR = "./audio"
-OUTPUT_DIR = "./output"
+# 修复：改为绝对路径。相对路径依赖 cwd，用户从其他目录直接运行脚本时
+# 会静默写错位置（subprocess 虽设置了 cwd，但直接运行单个脚本时无保护）。
+AUDIO_DIR = os.path.join(_SCRIPT_DIR, "audio")
+OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "output")
 
 ENABLE_SEARCH = False
 
@@ -76,7 +80,8 @@ TRANSLATE_REVIEW_BATCH_SIZE = 20   # 翻译审校阶段每批条数
 def get_env():
     env = os.environ.copy()
     env["DEEPSEEK_API_KEY"] = DEEPSEEK_API_KEY
-    env["ZHIPU_API_KEY"] = ZHIPU_API_KEY
+    env["TAVILY_API_KEY"] = TAVILY_API_KEY
+    env["EXA_API_KEY"] = EXA_API_KEY
     env["AUDIO_DIR"] = AUDIO_DIR
     env["OUTPUT_DIR"] = OUTPUT_DIR
     env["ENABLE_SEARCH"] = "1" if ENABLE_SEARCH else "0"
@@ -129,7 +134,7 @@ def run_step(step_num, total_steps, step_name, script_name, env):
 def main():
     print()
     print("=" * 60)
-    print("    ASMR 字幕全自动流水线 v3.0")
+    print("    ASMR 字幕全自动流水线 v3.5")
     print("    模型：DeepSeek-V4-Pro + Whisper Ensemble")
     print("=" * 60)
     print()

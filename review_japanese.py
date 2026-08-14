@@ -125,8 +125,12 @@ def _full_context_review(subs, reviewed_texts, client, log_prefix=""):
     if total <= FULL_REVIEW_BATCH:
         return _full_review_batch(subs, reviewed_texts, client, 0, total, log_prefix)
 
+    # 修复：FULL_REVIEW_BATCH <= 10 时 range step 为 0（ValueError）或负数
+    # （空 range → 全篇审校被静默跳过）。钳制为最小步长 1。
+    step = max(FULL_REVIEW_BATCH - 10, 1)
+
     all_corrected = list(reviewed_texts)
-    for batch_start in range(0, total, FULL_REVIEW_BATCH - 10):
+    for batch_start in range(0, total, step):
         batch_end = min(batch_start + FULL_REVIEW_BATCH, total)
         batch_result = _full_review_batch(
             subs[batch_start:batch_end],
@@ -140,7 +144,7 @@ def _full_context_review(subs, reviewed_texts, client, log_prefix=""):
     return all_corrected
 
 
-def _process_batch(client, batch, batch_start, batch_end, batch_count, log_prefix):
+def _process_batch(client, batch, batch_start, batch_end, log_prefix):
     """处理单个审校批次（可并行）"""
     batch_len = len(batch)
     review_input = "\n".join([f"[{s['index']}] {s['text']}" for s in batch])
@@ -289,7 +293,6 @@ def main():
     all_batches = []
     for fd_idx, fd in enumerate(all_files_data):
         bs = 0
-        batch_count = 0
         while bs < len(fd["subs"]):
             be = min(bs + BATCH_SIZE, len(fd["subs"]))
             batch = fd["subs"][bs:be]
@@ -297,9 +300,7 @@ def main():
                 "fd_idx": fd_idx,
                 "batch": batch,
                 "bs": bs, "be": be,
-                "bc": batch_count
             })
-            batch_count += 1
             bs += (BATCH_SIZE - OVERLAP)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -309,7 +310,7 @@ def main():
             log_prefix = f"[{fd['base']}] "
             future = executor.submit(
                 _process_batch, client, bdata["batch"],
-                bdata["bs"], bdata["be"], bdata["bc"], log_prefix
+                bdata["bs"], bdata["be"], log_prefix
             )
             futures[future] = bdata
 

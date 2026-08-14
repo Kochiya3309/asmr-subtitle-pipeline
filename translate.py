@@ -40,7 +40,10 @@ def _translate_batch(client, batch_texts, batch_start, batch_end, log_prefix):
         "4. 双关语优先保留语义，无法兼顾时取主要含义；\n"
         "5. 日语括号「」转为中文引号「」或保留原样；\n"
         "6. 每条译文之间用「---SPLIT---」分隔；\n"
-        "7. 不要添加序号或解释，纯译文。"
+        "7. 不要添加序号或解释，纯译文。\n"
+        "8. 日语原文中若含「〔認識不良〕」「（低信頼度）」等审校标记，说明该处原文不可靠：\n"
+        "   请根据上下文尽力猜测正常译出，并在译文末尾保留「（低信頼度）」标注；\n"
+        "   不要把标记本身当作台词翻译（如不要把「認識不良」译成\"认知不良\"）。"
     )
 
     print(f"{log_prefix}🔄 翻译：{batch_start+1}~{batch_end}")
@@ -57,11 +60,12 @@ def _translate_batch(client, batch_texts, batch_start, batch_end, log_prefix):
         print(f"{log_prefix}❌ 翻译失败，保留空占位")
         return [""] * len(batch_texts)
     else:
-        parts = result.split("---SPLIT---")
-        parts = [p.strip() for p in parts]
-        parts = [p for p in parts if p]
+        # Bug 修复：不再过滤空串。一条空译文不应导致整批丢弃——
+        # 保留空串才能与输入行数对齐；空条目用原文占位，交给审校阶段兜底。
+        parts = [p.strip() for p in result.split("---SPLIT---")]
 
         if len(parts) == len(batch_texts):
+            parts = [p if p else orig for p, orig in zip(parts, batch_texts)]
             print(f"{log_prefix}✅ 翻译完成（{len(parts)} 条）")
             return parts
         else:

@@ -37,17 +37,48 @@ VAD_MIN_SILENCE_MS = int(os.environ.get("VAD_MIN_SILENCE_MS", "500"))
 
 # ====== mismatch 跟踪（线程安全集合）======
 _mismatch_files = set()
-# ==========================================
+# ====== Turbo 补跑队列（不在并行 worker 里跑 GPU，交由阶段2.5 串行处理）======
+_needs_turbo = set()
+# ==========================================================================
 
 # ====== Whisper 模型缓存 ======
 _model_cache = {}
 
+def _detect_device():
+    """检测计算设备（基于 ctranslate2，faster-whisper 的推理后端）。
+    回归修复：此前用 torch 判 CUDA 是错的——本项目不依赖 torch，
+    faster-whisper 的 GPU 加速由 ctranslate2 + NVIDIA 运行库提供，
+    torch 缺失会被误判为无 GPU 而回退 CPU。
+    规则：有 CUDA 设备 → cuda/int8_float16（老 GPU 不支持时由
+    get_whisper_model 的加载降级兜底）；无 CUDA 设备 → cpu/int8。"""
+    import ctranslate2
+    try:
+        cuda_count = ctranslate2.get_cuda_device_count()
+    except Exception:
+        cuda_count = 0
+    if cuda_count > 0:
+        return "cuda", "int8_float16"
+    print("    ⚠ 未检测到可用 GPU，回退 CPU 模式（速度慢 5~10 倍）")
+    return "cpu", "int8"
+
+_device, _compute_type = _detect_device()
+
 def get_whisper_model(model_name):
     if model_name not in _model_cache:
-        print(f"    ⏳ 首次加载 {model_name} ...")
-        _model_cache[model_name] = WhisperModel(
-            model_name, device="cuda", compute_type="int8_float16"
-        )
+        print(f"    ⏳ 首次加载 {model_name}（{_device}/{_compute_type}）...")
+        try:
+            _model_cache[model_name] = WhisperModel(
+                model_name, device=_device, compute_type=_compute_type
+            )
+        except Exception as e:
+            # 老 GPU（计算能力 < 7.5）不支持 int8_float16，降级 float16 重试
+            if _device == "cuda" and _compute_type == "int8_float16":
+                print(f"    ⚠ int8_float16 加载失败（{e}），降级 float16 重试...")
+                _model_cache[model_name] = WhisperModel(
+                    model_name, device="cuda", compute_type="float16"
+                )
+            else:
+                raise
     else:
         print(f"    ♻ 复用已加载的 {model_name}")
     return _model_cache[model_name]
@@ -228,6 +259,15 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
 
     use_script = bool(script_text) and not _is_retry
 
+    # Bug 修复：无台本模式且 Turbo 缺失时提前返回 pending——
+    # 不在并行 worker 线程里跑 GPU 转写（违犯"阶段1串行转写（GPU 独占）"
+    # 设计，多文件并发补跑会 CUDA 争用/线程不安全），也避免无谓的 client 创建。
+    # 记录到补跑队列，由 main 的阶段2.5 在主线程串行处理。
+    if not use_script and not os.path.exists(turbo_srt):
+        _needs_turbo.add(base)
+        print(f"{log_prefix}⏳ Turbo 缺失，已加入阶段2.5 串行补跑队列")
+        return ("pending_turbo", None)
+
     client = get_deepseek_client()
 
     if use_script:
@@ -272,9 +312,6 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
         )
     else:
         # ===== 无台本模式：V3 + Turbo（原逻辑）=====
-        if not os.path.exists(turbo_srt):
-            print(f"{log_prefix}⏳ 补跑 Turbo ...")
-            transcribe_with_model("large-v3-turbo", audio_path, turbo_srt)
         with open(turbo_srt, "r", encoding="utf-8") as f:
             turbo_text = f.read().strip()
         turbo_lines = len(re.findall(r'\n\n+', turbo_text)) + 1
@@ -315,7 +352,9 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
         )
 
     input_len = len(user_input)
-    estimated_tokens = input_len // 2
+    # 修复：CJK 文本约 1 token/字符（原 //2 低估约一半，长音频会误判
+    # 通过 → API 超长 → 重试全部失败）。按 1:1 保守估算。
+    estimated_tokens = input_len
     print(f"{log_prefix}📨 发送融合请求：{input_len} 字符（约 {estimated_tokens} tokens）")
 
     if estimated_tokens > 100000:
@@ -413,6 +452,19 @@ def collect_audio_files():
     return files
 
 
+def _check_duplicate_bases(audio_files):
+    """检测去掉扩展名后重名的音频（如 foo.mp3 + foo.wav）。
+    重名会导致输出 SRT/预处理缓存互相覆盖，返回重复对列表 [(旧, 新), ...]。"""
+    seen, dups = {}, []
+    for af in audio_files:
+        b = os.path.splitext(os.path.basename(af))[0]
+        if b in seen:
+            dups.append((seen[b], af))
+        else:
+            seen[b] = af
+    return dups
+
+
 def main():
     reset_usage()
 
@@ -420,6 +472,16 @@ def main():
     if not audio_files:
         print(f"❌ 在 {AUDIO_DIR} 中未找到音频文件！")
         print(f"   支持的格式：{', '.join(AUDIO_EXTS)}")
+        sys.exit(1)
+
+    # 修复：检测重名 base（如 foo.mp3 + foo.wav），重名会导致输出
+    # SRT/预处理缓存互相覆盖。明确报错退出，而非静默覆盖。
+    dups = _check_duplicate_bases(audio_files)
+    if dups:
+        print(f"❌ 检测到文件名冲突（去掉扩展名后重名，输出会互相覆盖）：")
+        for a, b in dups:
+            print(f"   • {os.path.basename(a)} 与 {os.path.basename(b)}")
+        print(f"   请重命名其中一个文件后重新运行。")
         sys.exit(1)
 
     # V3.2 新增：台本映射检查
@@ -492,10 +554,38 @@ def main():
                 status, data = future.result()
                 if status == "ok":
                     results.append((af, data))
+                elif status == "pending_turbo":
+                    # 已加入阶段2.5 补跑队列，结果稍后填充
+                    print(f"[{os.path.basename(af)}] ⏳ 等待阶段2.5 补跑 Turbo")
                 else:
                     results.append((af, None))
             except Exception as e:
                 print(f"[{os.path.basename(af)}] ❌ 融合异常: {e}")
+                results.append((af, None))
+
+    # ================================================================
+    #  阶段2.5：串行补跑 Turbo + 重新融合（GPU 独占，主线程执行）
+    #  说明：mismatch 回退或阶段1 转写失败导致 Turbo 缺失的文件，不能在
+    #  线程池 worker 里补跑 GPU 转写（多线程并发 CUDA 会争用/崩溃），
+    #  统一在此串行补跑后重新融合。
+    # ================================================================
+    if _needs_turbo:
+        print(f"\n{'#'*60}")
+        print(f"# 阶段2.5：串行补跑 Turbo 并重新融合（{len(_needs_turbo)} 个文件）")
+        print(f"{'#'*60}\n")
+        for af in transcribed:
+            base = os.path.splitext(os.path.basename(af))[0]
+            if base not in _needs_turbo:
+                continue
+            log_prefix = f"[{base}] "
+            try:
+                turbo_srt = os.path.join(OUTPUT_DIR, f"{base}_turbo.srt")
+                if not os.path.exists(turbo_srt):
+                    transcribe_with_model("large-v3-turbo", af, turbo_srt)
+                status, data = fuse_one_audio(af, log_prefix, "", _is_retry=True)
+                results.append((af, data) if status == "ok" else (af, None))
+            except Exception as e:
+                print(f"[{base}] ❌ 阶段2.5 补跑异常: {e}")
                 results.append((af, None))
 
     # 写入 mismatch 列表（供下游 STEP2 选择性触发）

@@ -10,6 +10,7 @@ import common  # 触发日志初始化
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
 PATTERN = "*_final.srt"
 
+# 修复：清理重复项（"校正をお引き受けできません"和"安全で適切な内容に限られます"原各出现两次）
 API_ARTIFACT_PATTERNS = [
     "申し訳ありません",
     "字幕が不完全です",
@@ -17,13 +18,11 @@ API_ARTIFACT_PATTERNS = [
     "校正をお引き受けできません",
     "安全で適切な内容に限られます",
     "可协助的内容仅限于",
-    "安全で適切な内容に限られます",
     "恕难提供校对服务",
-    "校正をお引き受けできません",
     "如有其他文档需要帮助",
     "他の文書でお手伝いが必要でしたら",
     "搜索不可用",
-    "未配置 ZHIPU_API_KEY",
+    "未配置 TAVILY_API_KEY",
     "search is not available",
 ]
 
@@ -47,8 +46,15 @@ def validate_file(filepath):
     for block in raw_blocks:
         lines = block.strip().split('\n')
         if len(lines) >= 4:
+            # 修复：index 非数字（用户手改字幕/外部工具产物）时跳过该块并警告，
+            # 原实现直接 int() 崩溃且不提示位置
+            try:
+                idx = int(lines[0])
+            except ValueError:
+                print(f"  ⚠ 跳过格式异常块（首行非序号）：{lines[0][:40]!r} ...")
+                continue
             subs.append({
-                "index": int(lines[0]),
+                "index": idx,
                 "timecode": lines[1],
                 "text_ja": lines[2],
                 "text_zh": '\n'.join(lines[3:]).strip() if len(lines) > 3 else "",
@@ -76,15 +82,29 @@ def validate_file(filepath):
                 issues.append((idx, "API 残留", f"[{idx}] 中文译文疑似 API 拒绝/错误消息: '{zh[:80]}...'", zh))
                 break
 
-        omission_markers = ["中略", "省略", "認識不良", "认识不良", "低信頼度", "低信赖度"]
+        # 硬省略标记：AI 主动省略内容，属严重问题（critical）
+        omission_markers = ["中略", "省略"]
+        # 低置信度标记：上游 prompt（review_japanese / translate）明确要求生成的
+        # 猜测提示，属设计内产物，仅作警告（warning），不应阻断流水线
+        low_confidence_markers = ["認識不良", "认识不良", "低信頼度", "低信赖度"]
+
         for marker in omission_markers:
             if marker in zh or marker in ja:
                 issues.append((
                     idx, "内容省略",
-                    f"[{idx}] 包含省略/低质量标记 '{marker}'",
+                    f"[{idx}] 包含省略标记 '{marker}'",
                     f"日: {ja[:50]}... | 中: {zh[:50]}..."
                 ))
                 break
+        else:
+            for marker in low_confidence_markers:
+                if marker in zh or marker in ja:
+                    issues.append((
+                        idx, "低置信度标记",
+                        f"[{idx}] 包含低置信度标记 '{marker}'（建议人工复查该行）",
+                        f"日: {ja[:50]}... | 中: {zh[:50]}..."
+                    ))
+                    break
 
         if len(ja) < 2:
             issues.append((

@@ -41,7 +41,16 @@ def main():
         new_path = os.path.join(TARGET_DIR, f"{base}.srt")
 
         if os.path.exists(new_path):
-            print(f"  ⚠ {os.path.basename(old_path)} → {os.path.basename(new_path)}（目标已存在，覆盖）")
+            # 修复：静默覆盖会丢数据（如先 rename _cn_only 生成 XXX.srt，
+            # 再 rename _final 会覆盖同一文件）。目标已存在时先备份旧文件。
+            backup_path = os.path.join(TARGET_DIR, f"{base}.bak.srt")
+            n = 1
+            while os.path.exists(backup_path):
+                backup_path = os.path.join(TARGET_DIR, f"{base}.bak{n}.srt")
+                n += 1
+            os.replace(new_path, backup_path)
+            print(f"  ⚠ {os.path.basename(old_path)} → {os.path.basename(new_path)}"
+                  f"（旧文件已备份为 {os.path.basename(backup_path)}）")
         else:
             print(f"  ✅ {os.path.basename(old_path)} → {os.path.basename(new_path)}")
 

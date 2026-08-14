@@ -52,7 +52,7 @@ def clear_search_cache():
 def get_search_cache_stats():
     total = _search_cache_hits + _search_cache_misses
     rate = f"{_search_cache_hits}/{total}" if total > 0 else "0/0"
-    return f"搜索缓存命中：{rate}（节省 {_search_cache_hits} 次智谱 API 调用）"
+    return f"搜索缓存命中：{rate}（节省 {_search_cache_hits} 次搜索 API 调用）"
 
 # ======================================================================
 #  全局 Token 统计
@@ -63,7 +63,8 @@ _usage = {
     "total_tokens": 0,
     "cached_tokens": 0,
     "deepseek_calls": 0,
-    "zhipu_calls": 0,
+    "tavily_calls": 0,
+    "exa_calls": 0,
 }
 
 def reset_usage():
@@ -74,7 +75,8 @@ def reset_usage():
         "total_tokens": 0,
         "cached_tokens": 0,
         "deepseek_calls": 0,
-        "zhipu_calls": 0,
+        "tavily_calls": 0,
+        "exa_calls": 0,
     }
 
 def _add_usage(u):
@@ -105,13 +107,15 @@ def get_usage_report():
     input_cost = (cached * input_cached_price + missed * input_missed_price) / 1_000_000
     output_cost = u["completion_tokens"] / 1_000_000 * output_price
     total_cost = input_cost + output_cost
-    zhipu_cost = u["zhipu_calls"] * 0.0005
+    search_calls = u["tavily_calls"] + u["exa_calls"]
+    search_cost = search_calls * SEARCH_COST_PER_CALL
     lines = [
         "=" * 55,
         "  Token 消耗报告",
         "=" * 55,
         f"  DeepSeek 调用：{u['deepseek_calls']} 次",
-        f"  智谱搜索：    {u['zhipu_calls']} 次（约 ¥{zhipu_cost:.4f}）",
+        f"  联网搜索：    {search_calls} 次"
+        f"（Tavily {u['tavily_calls']} + Exa {u['exa_calls']}，约 ${search_cost:.4f}）",
         f"  输入 tokens： {prompt:>10,}",
         f"    缓存命中：  {cached:>10,}（{cache_rate:.1f}%）",
         f"    实际计费：  {missed:>10,}（未命中部分）",
@@ -135,8 +139,13 @@ def get_deepseek_client():
         _deepseek_client = OpenAI(api_key=key, base_url="https://api.deepseek.com")
     return _deepseek_client
 
-def get_zhipu_key():
-    return os.environ.get("ZHIPU_API_KEY", "")
+def get_search_keys():
+    """返回 (tavily_key, exa_key)。两个 key 都配置时并行查询两家并合并去重，
+    只配置一个时仅使用该提供商，均未配置时搜索自动关闭。"""
+    return (
+        os.environ.get("TAVILY_API_KEY", "").strip(),
+        os.environ.get("EXA_API_KEY", "").strip(),
+    )
 
 # ======================================================================
 #  工具定义
@@ -233,13 +242,59 @@ FUSION_TOOL = {
 }
 
 # ======================================================================
-#  智谱搜索（带缓存）
+#  联网搜索（Tavily + Exa，V3.5 起替换智谱）
 # ======================================================================
+
+# 单次搜索费用估算（美元/次）：两家免费额度均为 1000 次/月，超出后
+# 单价随套餐浮动（约 $0.005/次），仅用于粗略报告，可自行调整
+SEARCH_COST_PER_CALL = 0.005
 
 def _normalize_query(query):
     return ' '.join(query.strip().lower().split())
 
-def zhipu_search(query):
+def _http_post_json(url, headers, payload, timeout=15):
+    """HTTP POST JSON 请求（标准库 urllib，不引入第三方依赖）"""
+    import urllib.request
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def _tavily_search(query, key, max_results=5):
+    """Tavily 搜索（https://docs.tavily.com/）→ [(title, url, snippet), ...]"""
+    data = _http_post_json(
+        "https://api.tavily.com/search",
+        {"Authorization": f"Bearer {key}"},
+        {"query": query, "search_depth": "basic", "max_results": max_results},
+    )
+    return [
+        (r.get("title") or "", r.get("url", ""), (r.get("content") or "")[:400])
+        for r in data.get("results", [])
+        if r.get("url")
+    ]
+
+def _exa_search(query, key, max_results=5):
+    """Exa 搜索（https://docs.exa.ai/）→ [(title, url, snippet), ...]"""
+    data = _http_post_json(
+        "https://api.exa.ai/search",
+        {"x-api-key": key},
+        {"query": query, "numResults": max_results,
+         "contents": {"text": {"maxCharacters": 400}}},
+    )
+    return [
+        (r.get("title") or "", r.get("url", ""), (r.get("text") or "")[:400])
+        for r in data.get("results", [])
+        if r.get("url")
+    ]
+
+def web_search(query):
+    """联网搜索统一入口（替换原 zhipu_search）。已配置的提供商全部查询：
+    Tavily + Exa 结果按 URL 去重合并；仅配置一个时只用该提供商。
+    带查询缓存（命中直接返回，不消耗 API 次数）。"""
     global _search_cache, _search_cache_hits, _search_cache_misses, _usage
     normalized = _normalize_query(query)
     if not normalized:
@@ -249,32 +304,42 @@ def zhipu_search(query):
         _search_cache_hits += 1
         return _search_cache[cache_key] + " [缓存命中]"
 
-    # Bug #6 修复：先检查 Key，再计 miss
-    key = get_zhipu_key()
-    if not key:
-        return "搜索不可用：未配置 ZHIPU_API_KEY"
+    tavily_key, exa_key = get_search_keys()
+    if not tavily_key and not exa_key:
+        return "搜索不可用：未配置 TAVILY_API_KEY / EXA_API_KEY"
 
     _search_cache_misses += 1
-    try:
-        zc = OpenAI(api_key=key, base_url="https://open.bigmodel.cn/api/paas/v4/")
-        resp = zc.chat.completions.create(
-            model="glm-4-flash",
-            messages=[
-                {"role": "system", "content": "搜索助手。用中文返回关键信息，不超过500字。"},
-                {"role": "user", "content": normalized}
-            ],
-            tools=[{"type": "web_search", "web_search": {"enable": True, "search_query": normalized}}],  # type: ignore[arg-type]
-            temperature=0.1, max_tokens=4096,
-        )
-        c = resp.choices[0].message.content
-        result = c.strip() if c else "搜索未返回结果"
-    except Exception as e:
-        result = f"搜索失败: {e}"
+    entries, errors = [], []
 
-    # Bug #5 修复：不缓存错误结果
-    if not result.startswith("搜索失败"):
-        _search_cache[cache_key] = result
-    _usage["zhipu_calls"] += 1
+    def _run(name, fn):
+        try:
+            entries.extend(fn())
+            _usage[name + "_calls"] += 1
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            print(f"  ⚠ {name} 搜索失败: {e}")
+
+    if tavily_key:
+        _run("tavily", lambda: _tavily_search(normalized, tavily_key))
+    if exa_key:
+        _run("exa", lambda: _exa_search(normalized, exa_key))
+
+    if not entries:
+        # Bug #5 修复（沿用）：不缓存错误结果
+        return "搜索失败: " + "; ".join(errors)
+
+    # 按 URL 去重（保留先出现的）并合并为文本，限制总长避免撑爆模型上下文
+    seen, lines = set(), []
+    for title, url, snippet in entries:
+        if url in seen:
+            continue
+        seen.add(url)
+        head = f"· {title}（{url}）" if title else f"· {url}"
+        lines.append(f"{head}\n  {snippet}" if snippet else head)
+    result = "\n".join(lines)
+    if len(result) > 3500:
+        result = result[:3500] + "…"
+    _search_cache[cache_key] = result
     return result
 
 # ======================================================================
@@ -390,9 +455,9 @@ def call_deepseek(client, system_prompt, user_content,
         stream: 是否使用流式输出
         enable_search: 是否启用联网搜索
     """
-    if enable_search and not get_zhipu_key():
+    if enable_search and not any(get_search_keys()):
         if verbose:
-            print("  ⚠ 未配置 ZHIPU_API_KEY，关闭搜索")
+            print("  ⚠ 未配置 TAVILY_API_KEY / EXA_API_KEY，关闭搜索")
         enable_search = False
 
     if stream:
@@ -593,7 +658,7 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
                     if verbose:
                         print(f"{log_prefix}🔍 搜索：\"{query}\"")
                     cache_before = _search_cache_hits
-                    result = zhipu_search(query)
+                    result = web_search(query)
                     cache_after = _search_cache_hits
                     if cache_after > cache_before:
                         if verbose:
@@ -620,6 +685,16 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
                             for tc in msg.tool_calls
                         ]
                     })
+                    # Bug #10 修复：带 tool_calls 的 assistant 消息之后必须跟随
+                    # 对应的 tool 响应消息，否则下一次请求 API 返回 400
+                    # （insufficient tool messages following tool_calls message）。
+                    # 此处用占位响应补齐协议，让模型继续生成。
+                    for tc in msg.tool_calls:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": "（空）"
+                        })
                 else:
                     messages.append({
                         "role": "assistant",
@@ -777,8 +852,15 @@ def parse_srt_full(filepath):
         lines = block.strip().split('\n')
         # Bug #8 修复：len(lines) >= 4 已保证 lines[3] 存在，无需再判断
         if len(lines) >= 4:
+            # 修复：index 非数字（用户手改字幕/外部工具产物）时跳过该块并警告，
+            # 原实现直接 int() 崩溃且不提示是哪个文件哪一行
+            try:
+                idx = int(lines[0])
+            except ValueError:
+                print(f"⚠ 跳过格式异常块（首行非序号）：{lines[0][:40]!r} ...")
+                continue
             subs.append({
-                "index": int(lines[0]),
+                "index": idx,
                 "timecode": lines[1],
                 "text_ja": lines[2],
                 "text_zh": '\n'.join(lines[3:]).strip(),
