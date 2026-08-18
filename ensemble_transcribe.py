@@ -8,7 +8,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 from common import (
-    get_deepseek_client, call_deepseek, extract_srt_from_response,
+    get_llm_client, call_deepseek, extract_srt_from_response,
     format_timestamp, FUSION_TOOL, read_text_file,
     reset_usage, get_usage_report
 )
@@ -240,7 +240,7 @@ def transcribe_one_audio(audio_path, has_script=False):
 
 
 def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
-    """阶段2：DeepSeek 融合（网络 I/O，可并行）
+    """阶段2：LLM 融合（网络 I/O，可并行）
     有台本时走 V3+台本 模式（简化 prompt，跳过 Turbo）；
     无台本或 mismatch 回退时走 V3+Turbo 模式（原 prompt）。"""
     base = os.path.splitext(os.path.basename(audio_path))[0]
@@ -268,7 +268,7 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
         print(f"{log_prefix}⏳ Turbo 缺失，已加入阶段2.5 串行补跑队列")
         return ("pending_turbo", None)
 
-    client = get_deepseek_client()
+    client = get_llm_client()
 
     if use_script:
         # ===== 台本模式：V3 + 台本（不需要 Turbo）=====
@@ -529,11 +529,11 @@ def main():
     #  阶段2：并行融合所有文件（网络 I/O）
     # ================================================================
     print(f"\n{'#'*60}")
-    print(f"# 阶段2：DeepSeek 融合（并行，并发数 {MAX_WORKERS}）")
+    print(f"# 阶段2：LLM 融合（并行，并发数 {MAX_WORKERS}）")
     print(f"{'#'*60}\n")
 
     # 预初始化 client，避免多线程首次调用时重复创建
-    get_deepseek_client()
+    get_llm_client()
 
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

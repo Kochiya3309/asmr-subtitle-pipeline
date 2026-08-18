@@ -26,7 +26,12 @@ import common  # 触发日志初始化
 #  配置区
 # ============================================================
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+# V3.6 起 LLM 改为 OpenAI 兼容配置（OPENAI_* 前缀），旧 DEEPSEEK_API_KEY 自动回退
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("DEEPSEEK_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "")
+OPENAI_ENABLE_THINKING = os.environ.get("OPENAI_ENABLE_THINKING", "0")
+OPENAI_MAX_TOKENS = os.environ.get("OPENAI_MAX_TOKENS", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 
@@ -37,7 +42,7 @@ OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "output")
 
 ENABLE_SEARCH = False
 
-MAX_WORKERS = 10              # DeepSeek API 并发数
+MAX_WORKERS = 10              # LLM API 并发数
 
 # 台本功能（V3.2 新增）
 ENABLE_SCRIPT = False             # 总开关，False 时整条台本流程跳过
@@ -79,7 +84,17 @@ TRANSLATE_REVIEW_BATCH_SIZE = 20   # 翻译审校阶段每批条数
 
 def get_env():
     env = os.environ.copy()
-    env["DEEPSEEK_API_KEY"] = DEEPSEEK_API_KEY
+    env["OPENAI_API_KEY"] = OPENAI_API_KEY
+    # 可选配置：非空才注入（空值注入会让子进程 env 键存在但为空，
+    # 依赖 common 的 ValueError 兜底，绕弯且易混）
+    if OPENAI_BASE_URL:
+        env["OPENAI_BASE_URL"] = OPENAI_BASE_URL
+    if OPENAI_MODEL:
+        env["OPENAI_MODEL"] = OPENAI_MODEL
+    if OPENAI_ENABLE_THINKING:
+        env["OPENAI_ENABLE_THINKING"] = OPENAI_ENABLE_THINKING
+    if OPENAI_MAX_TOKENS:
+        env["OPENAI_MAX_TOKENS"] = OPENAI_MAX_TOKENS
     env["TAVILY_API_KEY"] = TAVILY_API_KEY
     env["EXA_API_KEY"] = EXA_API_KEY
     env["AUDIO_DIR"] = AUDIO_DIR
@@ -134,8 +149,8 @@ def run_step(step_num, total_steps, step_name, script_name, env):
 def main():
     print()
     print("=" * 60)
-    print("    ASMR 字幕全自动流水线 v3.5")
-    print("    模型：DeepSeek-V4-Pro + Whisper Ensemble")
+    print("    ASMR 字幕全自动流水线 v3.6")
+    print(f"    模型：{OPENAI_MODEL or 'deepseek-v4-pro'} + Whisper Ensemble")
     print("=" * 60)
     print()
     print(f"    音频目录：{AUDIO_DIR}")

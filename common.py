@@ -62,7 +62,7 @@ _usage = {
     "completion_tokens": 0,
     "total_tokens": 0,
     "cached_tokens": 0,
-    "deepseek_calls": 0,
+    "llm_calls": 0,
     "tavily_calls": 0,
     "exa_calls": 0,
 }
@@ -74,7 +74,7 @@ def reset_usage():
         "completion_tokens": 0,
         "total_tokens": 0,
         "cached_tokens": 0,
-        "deepseek_calls": 0,
+        "llm_calls": 0,
         "tavily_calls": 0,
         "exa_calls": 0,
     }
@@ -96,48 +96,93 @@ def get_usage_report():
     u = _usage
     total = u["total_tokens"]
     if total == 0:
-        return "（本次未调用 DeepSeek API）"
+        return "（本次未调用 LLM API）"
     prompt = u["prompt_tokens"]
     cached = u["cached_tokens"]
     missed = prompt - cached
     cache_rate = (cached / prompt * 100) if prompt > 0 else 0
-    input_cached_price = 0.025
-    input_missed_price = 3.0
-    output_price = 6.0
-    input_cost = (cached * input_cached_price + missed * input_missed_price) / 1_000_000
-    output_cost = u["completion_tokens"] / 1_000_000 * output_price
-    total_cost = input_cost + output_cost
     search_calls = u["tavily_calls"] + u["exa_calls"]
-    search_cost = search_calls * SEARCH_COST_PER_CALL
+    # V3.6 起不再估算费用（LLM 服务商可换、单价多变），仅统计 token 用量
     lines = [
         "=" * 55,
-        "  Token 消耗报告",
+        "  Token 用量报告",
         "=" * 55,
-        f"  DeepSeek 调用：{u['deepseek_calls']} 次",
+        f"  LLM 调用：    {u['llm_calls']} 次",
         f"  联网搜索：    {search_calls} 次"
-        f"（Tavily {u['tavily_calls']} + Exa {u['exa_calls']}，约 ${search_cost:.4f}）",
+        f"（Tavily {u['tavily_calls']} + Exa {u['exa_calls']}）",
         f"  输入 tokens： {prompt:>10,}",
         f"    缓存命中：  {cached:>10,}（{cache_rate:.1f}%）",
-        f"    实际计费：  {missed:>10,}（未命中部分）",
+        f"    未缓存：    {missed:>10,}",
         f"  输出 tokens： {u['completion_tokens']:>10,}",
         f"  总计 tokens： {total:>10,}",
-        "  ──────────────────────────────────",
-        f"  精确费用：    ¥{total_cost:.4f}",
     ]
     return "\n".join(lines)
+
+# ======================================================================
+#  LLM 配置（V3.6 起：OpenAI 兼容格式，由 .env 的 OPENAI_* 变量配置）
+# ======================================================================
+
+_llm_config = None  # 模块级缓存（进程启动时环境变量已注入，运行中不变）
+
+def get_llm_config():
+    """读取 LLM 配置（OpenAI 兼容 API）。
+    模块级缓存一次：进程启动时环境变量已注入，运行中配置不变，
+    缓存可避免每轮 API 调用重复读取、并防止运行中途配置漂移。
+    支持任意 OpenAI 兼容服务；OPENAI_API_KEY 为空时回退旧
+    DEEPSEEK_API_KEY（平滑迁移旧配置）。
+    返回 (api_key, base_url, model, enable_thinking, max_tokens)。"""
+    global _llm_config
+    if _llm_config is None:
+        api_key = (os.environ.get("OPENAI_API_KEY", "").strip()
+                   or os.environ.get("DEEPSEEK_API_KEY", "").strip())
+        base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.deepseek.com"
+        model = os.environ.get("OPENAI_MODEL", "").strip() or "deepseek-v4-pro"
+        enable_thinking = os.environ.get("OPENAI_ENABLE_THINKING", "0") == "1"
+        try:
+            max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "131072"))
+        except ValueError:
+            max_tokens = 131072
+        _llm_config = (api_key, base_url, model, enable_thinking, max_tokens)
+    return _llm_config
+
+def _api_error_hint(e):
+    """API 错误提示：max_tokens 超限类错误提示用户调低 OPENAI_MAX_TOKENS。"""
+    msg = str(e)
+    if "max_tokens" in msg.lower() or "maximum context length" in msg.lower():
+        return "（若为 max_tokens 超限，请调低 .env 的 OPENAI_MAX_TOKENS）"
+    return ""
+
+def _build_extra_body(budget_tokens):
+    """构建 extra_body：仅当启用思维链时传 thinking 参数。
+    thinking 是 DeepSeek 的非标准参数，OpenAI 等标准服务会拒绝未知参数，
+    因此开关关闭（默认）时不传任何额外参数。"""
+    _, _, _, enable_thinking, _ = get_llm_config()
+    if enable_thinking:
+        return {"thinking": {"type": "enabled", "budget_tokens": budget_tokens}}
+    return None
 
 # ======================================================================
 #  API 客户端（模块级缓存）
 # ======================================================================
 
-_deepseek_client = None
+_llm_client = None
+
+def get_llm_client():
+    """获取 LLM API 客户端（OpenAI 兼容）。
+    服务地址与模型由 .env 的 OPENAI_BASE_URL / OPENAI_MODEL 配置，
+    未配置时默认 DeepSeek。"""
+    global _llm_client
+    if _llm_client is None:
+        api_key, base_url, _, _, _ = get_llm_config()
+        if not api_key:
+            print("❌ 未配置 OPENAI_API_KEY（或旧 DEEPSEEK_API_KEY），请在 .env 中配置")
+            raise RuntimeError("缺少 LLM API Key")
+        _llm_client = OpenAI(api_key=api_key, base_url=base_url)
+    return _llm_client
 
 def get_deepseek_client():
-    global _deepseek_client
-    if _deepseek_client is None:
-        key = os.environ.get("DEEPSEEK_API_KEY", "")
-        _deepseek_client = OpenAI(api_key=key, base_url="https://api.deepseek.com")
-    return _deepseek_client
+    """历史别名，请使用 get_llm_client。"""
+    return get_llm_client()
 
 def get_search_keys():
     """返回 (tavily_key, exa_key)。两个 key 都配置时并行查询两家并合并去重，
@@ -244,10 +289,6 @@ FUSION_TOOL = {
 # ======================================================================
 #  联网搜索（Tavily + Exa，V3.5 起替换智谱）
 # ======================================================================
-
-# 单次搜索费用估算（美元/次）：两家免费额度均为 1000 次/月，超出后
-# 单价随套餐浮动（约 $0.005/次），仅用于粗略报告，可自行调整
-SEARCH_COST_PER_CALL = 0.005
 
 def _normalize_query(query):
     return ' '.join(query.strip().lower().split())
@@ -429,7 +470,7 @@ def parse_review_result(result, expected_count, original_texts,
         return list(original_texts), 0
 
 # ======================================================================
-#  DeepSeek 统一入口
+#  LLM 统一入口
 # ======================================================================
 
 def _default_output_parser(args):
@@ -446,7 +487,7 @@ def call_deepseek(client, system_prompt, user_content,
                   log_prefix="",
                   show_reasoning=False):
     """
-    统一 DeepSeek API 调用入口。
+    统一 LLM API 调用入口。
 
     参数:
         output_tool: 结构化输出工具定义 (OUTPUT_TOOL / CORRECTION_TOOL 等)
@@ -483,17 +524,18 @@ def call_deepseek(client, system_prompt, user_content,
 def _call_streaming(client, system_prompt, user_content, retries, verbose,
                     log_prefix="", show_reasoning=False):
     global _usage
+    _, _, model, _, max_tokens = get_llm_config()
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
-                model="deepseek-v4-pro",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content}
                 ],
-                temperature=0.25, max_tokens=131072, stream=True,
+                temperature=0.25, max_tokens=max_tokens, stream=True,
                 stream_options={"include_usage": True},
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": 65536}}
+                extra_body=_build_extra_body(65536)
             )
             reasoning_parts, content_parts = [], []
             usage_recorded = False
@@ -512,7 +554,7 @@ def _call_streaming(client, system_prompt, user_content, retries, verbose,
                 if not usage_recorded and hasattr(chunk, 'usage') and chunk.usage:
                     _add_usage(chunk.usage)
                     usage_recorded = True
-            _usage["deepseek_calls"] += 1
+            _usage["llm_calls"] += 1
             rt = ''.join(reasoning_parts)
             fc = ''.join(content_parts)
             if verbose:
@@ -538,6 +580,7 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
                         log_prefix="", show_reasoning=False):
     global _usage
     cache_before_hits = _search_cache_hits
+    _, _, model, _, max_tokens = get_llm_config()
 
     tools = []
     if enable_search:
@@ -575,18 +618,18 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
         for attempt in range(retries):
             try:
                 resp = client.chat.completions.create(
-                    model="deepseek-v4-pro",
+                    model=model,
                     messages=messages,
                     tools=round_tools,
-                    temperature=0.25, max_tokens=131072, stream=False,
-                    extra_body={"thinking": {"type": "enabled", "budget_tokens": 65536}}
+                    temperature=0.25, max_tokens=max_tokens, stream=False,
+                    extra_body=_build_extra_body(65536)
                 )
-                _usage["deepseek_calls"] += 1
+                _usage["llm_calls"] += 1
                 if hasattr(resp, 'usage') and resp.usage:
                     _add_usage(resp.usage)
                 break
             except Exception as e:
-                print(f"{log_prefix}⚠ API 错误 (第{attempt+1}次): {e}")
+                print(f"{log_prefix}⚠ API 错误 (第{attempt+1}次): {e}{_api_error_hint(e)}")
                 time.sleep(3)
 
         if resp is None:
@@ -703,13 +746,13 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
 
                 try:
                     resp2 = client.chat.completions.create(
-                        model="deepseek-v4-pro",
+                        model=model,
                         messages=messages,
                         tools=round_tools,
-                        temperature=0.25, max_tokens=131072, stream=False,
-                        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}}
+                        temperature=0.25, max_tokens=max_tokens, stream=False,
+                        extra_body=_build_extra_body(4096)
                     )
-                    _usage["deepseek_calls"] += 1
+                    _usage["llm_calls"] += 1
                     if hasattr(resp2, 'usage') and resp2.usage:
                         _add_usage(resp2.usage)
                     msg2 = resp2.choices[0].message
@@ -741,7 +784,7 @@ def _call_non_streaming(client, system_prompt, user_content, retries, verbose,
                         return content2
                 except Exception as e:
                     if verbose:
-                        print(f"{log_prefix}   ❌ 重试失败: {e}")
+                        print(f"{log_prefix}   ❌ 重试失败: {e}{_api_error_hint(e)}")
 
             if verbose:
                 content_len = len(content)

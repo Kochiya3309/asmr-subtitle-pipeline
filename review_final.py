@@ -7,7 +7,7 @@ import glob
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
-    get_deepseek_client, call_deepseek, parse_srt_full,
+    get_llm_client, call_deepseek, parse_srt_full,
     reset_usage, get_usage_report
 )
 
@@ -76,7 +76,7 @@ def process_one_file(input_path, log_prefix=""):
     total = len(subs)
     print(f"{log_prefix}   共 {total} 条字幕")
 
-    client = get_deepseek_client()
+    client = get_llm_client()
     corpus_view = build_corpus_view(subs)
 
     # ====== system_prompt 由用户自行填充 ======

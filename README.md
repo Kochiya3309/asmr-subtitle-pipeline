@@ -1,4 +1,4 @@
-# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.5.0）
+# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.6.0）
 
 ## 这是什么？
 
@@ -6,7 +6,7 @@
 
 工作流程：音频 → Whisper 双模型转写日文字幕 → AI 审校日语错误 → 结合上下文审查可能的识别错误 → 翻译成中文 → AI 逐段审校翻译 → AI 全篇终审（宏观+微观） → 自动化规则验证 → 双语字幕 .srt 文件。
 
-当前版本 V3.5.0：联网搜索使用 Tavily + Exa 双引擎（并行查询、去重合并）；无 NVIDIA GPU 的机器可自动回退 CPU 运行；并修复了 API 400 错误、流水线误中断、空译文整批丢弃等一批长期问题。历史版本变化详见文末「更新日志」。
+当前版本 V3.6.0：LLM 接入改为 OpenAI 兼容格式，任意兼容服务（DeepSeek / OpenAI / 硅基流动 / Moonshot 等）均可通过 .env 配置使用，默认仍是 DeepSeek；联网搜索使用 Tavily + Exa 双引擎；无 NVIDIA GPU 的机器可自动回退 CPU 运行。历史版本变化详见文末「更新日志」。
 
 全程只需把音频放进文件夹，双击运行，等它跑完。用 PotPlayer / VLC / MPC 加载输出的字幕文件即可。
 
@@ -22,7 +22,7 @@
    venv\Scripts\activate
    pip install -r requirements.txt
    ```
-2. **配密钥**：复制 `.env.example` 为 `.env`，填入 `DEEPSEEK_API_KEY`（必须，platform.deepseek.com 申请）。联网搜索可选，见下文 2.2 节。
+2. **配密钥**：复制 `.env.example` 为 `.env`，填入 `OPENAI_API_KEY`（默认 DeepSeek，platform.deepseek.com 申请；也可换任意 OpenAI 兼容服务，见下文 2.1 节）。联网搜索可选，见下文 2.2 节。
 3. **放音频**：把音频文件（mp3/m4a/wav/flac 等）丢进 `audio` 文件夹。
 4. **运行**：双击 `start.bat`，或命令行 `python run_all.py`。首次运行会自动下载约 4.5GB 的 Whisper 模型。
 5. **观看**：用播放器加载 `output` 目录下的 `*_final.srt`（纯中文版为 `*_cn_only.srt`）。
@@ -40,7 +40,7 @@
 | 内存 | 16GB | 32GB |
 | 硬盘 | 10GB 空闲（存模型） | SSD |
 | Python | 3.10 或 3.11 | 3.10 |
-| 网络 | 能访问 api.deepseek.com | 稳定宽带 |
+| 网络 | 能访问所选 LLM 服务的 API 地址 | 稳定宽带 |
 
 如果没有 NVIDIA 显卡，也可以用 CPU 跑（V3.5 起自动检测回退，无需手动修改），但转写速度会慢 5 到 10 倍。32GB 内存下 CPU 模式仍可正常使用。
 
@@ -64,9 +64,21 @@
 
 ## 第二步：获取 API Keys
 
-### 2.1 DeepSeek API Key（必须）
+### 2.1 LLM API Key（必须，V3.6 起为 OpenAI 兼容格式）
 
-打开 platform.deepseek.com，注册账号（支持手机号）。进入「API Keys」页面，点击「创建 API Key」。复制生成的那串 sk-xxxxxxxx 密钥，保存好。新用户赠送 500 万 tokens 免费额度，够处理几十到上百小时的音频（具体以deepseek官网为准）。用完后按量付费，1 小时音频全程约 0.18 到 0.35 元。
+V3.6 起 LLM 接入改为 OpenAI 兼容格式，`.env` 中通过 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` 配置，**默认服务商仍是 DeepSeek**：
+
+- **DeepSeek（默认，无需额外配置）**：打开 platform.deepseek.com，注册账号 → 进入「API Keys」页面 → 创建 API Key（sk- 开头）。只需在 .env 填入 `OPENAI_API_KEY` 即可，base_url 和模型名用默认值。**⚠ 建议同时设置 `OPENAI_ENABLE_THINKING=1`**——思维链增强在 V3.5 及以前默认开启，V3.6 起默认关闭（为兼容 OpenAI 等标准服务），不设置会失去思考能力，审校质量可能下降。
+- **换其他 OpenAI 兼容服务**（OpenAI / 硅基流动 / Moonshot / GLM 等）：改 `.env` 里的 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`，并把 `OPENAI_ENABLE_THINKING` 设为 0（thinking 是 DeepSeek 的非标准参数，标准服务不认，不关会报错）：
+  ```
+  OPENAI_API_KEY=sk-你的密钥
+  OPENAI_BASE_URL=https://api.openai.com/v1
+  OPENAI_MODEL=gpt-4o
+  OPENAI_ENABLE_THINKING=0
+  ```
+- 兼容旧配置：不填 `OPENAI_API_KEY` 时会自动回退读取旧的 `DEEPSEEK_API_KEY`。
+
+费用按所选服务商计费，参考其官网。以 DeepSeek 为例：新用户赠送 500 万 tokens 免费额度，够处理几十到上百小时的音频；用完后按量付费，1 小时音频全程约 0.18 到 0.35 元。
 
 ### 2.2 Tavily / Exa API Key（可选，用于联网搜索）
 
@@ -109,12 +121,12 @@ pip install -r requirements.txt
 项目根目录下有一个 `.env.example` 模板文件。复制它为 `.env` 并填入你的 API Key：
 
 ```
-DEEPSEEK_API_KEY=sk-你的deepseek密钥
+OPENAI_API_KEY=sk-你的LLM密钥
 TAVILY_API_KEY=tvly-你的tavily密钥（可选）
 EXA_API_KEY=你的exa密钥（可选）
 ```
 
-`.env` 文件已在 `.gitignore` 中，不会被提交到 git。run_all.py 启动时会自动加载 `.env`（V3.4.1 起，无需修改任何 .py 文件）。如果已设置系统环境变量 `DEEPSEEK_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY`，则优先使用系统环境变量。
+`.env` 文件已在 `.gitignore` 中，不会被提交到 git。run_all.py 启动时会自动加载 `.env`（V3.4.1 起，无需修改任何 .py 文件）。如果已设置系统环境变量 `OPENAI_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY`，则优先使用系统环境变量。
 
 ENABLE_SEARCH 设为 True 开启联网搜索，False 关闭。如果不希望 AI 联网搜索作品相关词汇，保持 False 即可。
 
@@ -156,7 +168,7 @@ python run_all.py
 
 用 PotPlayer / VLC / MPC 等播放器打开对应音频，将 _final.srt 拖入播放窗口即可看到字幕。
 
-每个脚本跑完后会自动打印 Token 消耗报告，包含本次调用的 DeepSeek API 次数、输入和输出 token 数量、缓存命中率、以及精确费用。所有输出同时写入 output/pipeline.log，终端关闭后仍可回溯。
+每个脚本跑完后会自动打印 Token 用量报告，包含 LLM 调用次数、输入和输出 token 数量、缓存命中率（V3.6 起不再估算费用）。所有输出同时写入 output/pipeline.log，终端关闭后仍可回溯。
 
 ---
 
@@ -177,7 +189,7 @@ STEP6_STRIP = True      # 去除日文仅留中文（默认开启）
 
 所有关键参数已集中到 run_all.py 顶部配置区，无需翻进子脚本修改：
 
-MAX_WORKERS = 10                       # DeepSeek API 并发数（V3.0 起用于审校/翻译/终审，V3.1 起亦用于 ensemble 融合阶段）
+MAX_WORKERS = 10                       # LLM API 并发数（V3.0 起用于审校/翻译/终审，V3.1 起亦用于 ensemble 融合阶段）
 REVIEW_JP_BATCH_SIZE = 30             # 日语逐批审校每批条数
 REVIEW_JP_OVERLAP = 5                 # 相邻批次重叠条数
 REVIEW_JP_FULL_REVIEW = True          # 日语全篇上下文审校开关
@@ -256,13 +268,13 @@ SCRIPT_DIR = "./scripts"         # 台本所在目录
 
 ## 流水线各步骤详解
 
-第一步 ensemble_transcribe.py 用 Whisper large-v3 和 large-v3-turbo 两个模型分别转写同一份音频。large-v3 日语识别精度最高但偶尔漏短句，large-v3-turbo 速度快约八倍且 VAD 切分更密集，能捕捉到 V3 漏掉的短片段。V3.1 起脚本分为两个阶段执行：阶段1串行处理所有音频文件的双模型转写（GPU 独占，避免显存争用），Whisper 模型在处理多个音频文件时只加载一次，后续文件复用已加载的模型实例；阶段2用 ThreadPoolExecutor 并行调用 DeepSeek 对所有文件的两份 SRT 进行逐条比对融合（并发数由 MAX_WORKERS 控制）。V3.3 起台本模式优化：有台本的音频在阶段1跳过 Turbo（仅跑 V3），阶段2采用简化的 V3+台本融合 prompt（不再对比 V3 与 Turbo），节省约一半 GPU 转写时间。若融合阶段 AI 检测到台本与 Whisper 严重不匹配，自动补跑 Turbo 并回退到 V3+Turbo 融合（原 prompt），mismatch 文件记录到 script_mismatch.json 供下游 STEP2 选择性触发。无台本模式下行为与 V3.2 完全一致。V3.4 起转写前新增音频预处理（librosa 读取 + 80Hz 高通滤波 + noisereduce 降噪 + 归一化，缓存为 *_preprocessed.wav），VAD 参数针对 ASMR 耳语调优（threshold 0.2、min_speech 50ms、speech_pad 800ms）并通过环境变量暴露，新增 initial_prompt 引导与 hotwords 热词支持提升专有名词识别率。融合逻辑：时间轴接近的条目视为同一段语音，AI 选择两个版本中语法更正确、上下文更通顺的一方；只有某一方能捕捉到的条目，如果确实是自然的日语表达就保留。融合提示词明确要求 AI 不得省略或丢弃仅在一个模型中存在的内容，即使片段化也必须保留。V3.0 起融合阶段改用 submit_fusion 工具进行 Function Calling 结构化输出，格式可靠性大幅提升，纯文本回退仍保留作为兜底。双模型融合可消除单模型约百分之三十的个体偏差。两阶段分离后，转写阶段仍是串行瓶颈（GPU 独占），但融合阶段的网络等待被并发摊薄，多文件场景下 ensemble 总耗时缩短约 20%。
+第一步 ensemble_transcribe.py 用 Whisper large-v3 和 large-v3-turbo 两个模型分别转写同一份音频。large-v3 日语识别精度最高但偶尔漏短句，large-v3-turbo 速度快约八倍且 VAD 切分更密集，能捕捉到 V3 漏掉的短片段。V3.1 起脚本分为两个阶段执行：阶段1串行处理所有音频文件的双模型转写（GPU 独占，避免显存争用），Whisper 模型在处理多个音频文件时只加载一次，后续文件复用已加载的模型实例；阶段2用 ThreadPoolExecutor 并行调用 LLM 对所有文件的两份 SRT 进行逐条比对融合（并发数由 MAX_WORKERS 控制）。V3.3 起台本模式优化：有台本的音频在阶段1跳过 Turbo（仅跑 V3），阶段2采用简化的 V3+台本融合 prompt（不再对比 V3 与 Turbo），节省约一半 GPU 转写时间。若融合阶段 AI 检测到台本与 Whisper 严重不匹配，自动补跑 Turbo 并回退到 V3+Turbo 融合（原 prompt），mismatch 文件记录到 script_mismatch.json 供下游 STEP2 选择性触发。无台本模式下行为与 V3.2 完全一致。V3.4 起转写前新增音频预处理（librosa 读取 + 80Hz 高通滤波 + noisereduce 降噪 + 归一化，缓存为 *_preprocessed.wav），VAD 参数针对 ASMR 耳语调优（threshold 0.2、min_speech 50ms、speech_pad 800ms）并通过环境变量暴露，新增 initial_prompt 引导与 hotwords 热词支持提升专有名词识别率。融合逻辑：时间轴接近的条目视为同一段语音，AI 选择两个版本中语法更正确、上下文更通顺的一方；只有某一方能捕捉到的条目，如果确实是自然的日语表达就保留。融合提示词明确要求 AI 不得省略或丢弃仅在一个模型中存在的内容，即使片段化也必须保留。V3.0 起融合阶段改用 submit_fusion 工具进行 Function Calling 结构化输出，格式可靠性大幅提升，纯文本回退仍保留作为兜底。双模型融合可消除单模型约百分之三十的个体偏差。两阶段分离后，转写阶段仍是串行瓶颈（GPU 独占），但融合阶段的网络等待被并发摊薄，多文件场景下 ensemble 总耗时缩短约 20%。
 
-第二步 review_japanese.py 分为两个阶段。阶段一是逐批审校：读取融合后的日语字幕，按每 30 条一组发送给 DeepSeek，让 AI 修正同音异义词、助词错误、气息误判和不自然的断句。相邻组之间有 5 条重叠以消除上下文断裂。系统提示词中包含了成人向内容的类型提示（催淫、媚药、触手等），以及低品质音频误识别的检测指引，帮助 AI 在局部上下文中识别 Whisper 的典型误听模式。无法识别的内容统一标记为「〔認識不良〕」以便后续人工复查。阶段二是全篇上下文审校：在所有批次处理完成后，将全篇日语字幕打包发送给 AI，让 AI 利用完整的作品世界观和术语一致性来修正逐批审校无法发现的同音词误判。V3.0 起两个阶段均支持跨文件并行处理，多个文件的批次同时发送 API 请求。全篇上下文审校的输出通过 submit_review 工具以保证格式可靠，同样享受三层兜底保护。V3.3 起在台本模式下该步骤默认跳过（台本即权威文本无需审校），仅当 STEP1 产出 script_mismatch.json 且非空时触发，且仅审校 mismatch 文件（自动回退为 V3+Turbo 融合的产物）。无台本模式下行为与 V3.2 完全一致。
+第二步 review_japanese.py 分为两个阶段。阶段一是逐批审校：读取融合后的日语字幕，按每 30 条一组发送给 LLM，让 AI 修正同音异义词、助词错误、气息误判和不自然的断句。相邻组之间有 5 条重叠以消除上下文断裂。系统提示词中包含了成人向内容的类型提示（催淫、媚药、触手等），以及低品质音频误识别的检测指引，帮助 AI 在局部上下文中识别 Whisper 的典型误听模式。无法识别的内容统一标记为「〔認識不良〕」以便后续人工复查。阶段二是全篇上下文审校：在所有批次处理完成后，将全篇日语字幕打包发送给 AI，让 AI 利用完整的作品世界观和术语一致性来修正逐批审校无法发现的同音词误判。V3.0 起两个阶段均支持跨文件并行处理，多个文件的批次同时发送 API 请求。全篇上下文审校的输出通过 submit_review 工具以保证格式可靠，同样享受三层兜底保护。V3.3 起在台本模式下该步骤默认跳过（台本即权威文本无需审校），仅当 STEP1 产出 script_mismatch.json 且非空时触发，且仅审校 mismatch 文件（自动回退为 V3+Turbo 融合的产物）。无台本模式下行为与 V3.2 完全一致。
 
 第三步 translate.py 分两个阶段。翻译阶段按每 10 条一组将日语批量翻译为简体中文，纯流式调用，不开启搜索以节省时间和费用。V3.0 优化了翻译提示词，新增拟声词处理、不完整句子翻译、双关语处理、括号格式统一等规则。审校阶段按每 20 条一组将原文和初译并列发送给 AI 进行比对修正，输出修正后的中文译文，使用 submit_review 结构化输出。低质量原文的处理方式改为始终输出中文译文并标注「（低信頼度）」，不再在译文栏保留日语原文。两个阶段均支持跨文件并行。搜索相关提示词根据 ENABLE_SEARCH 开关动态拼接，搜索关闭时 AI 不会看到任何关于 web_search 的提及。V3.3 起输入逻辑改为以 *_ensemble.srt 为基础扫描，对每个文件优先使用 *_reviewed.srt，不存在则回退到 *_ensemble.srt，使台本模式跳过 STEP2 时 STEP3 仍可正常运行；混合场景下（部分文件经审校、部分未审校）也可正确处理。
 
-第四步 review_final.py 将全篇字幕（日中对）打包为一个整体发送给 DeepSeek，同时从宏观和微观两个角度进行终审。宏观检查关注角色称呼是否统一、上下文是否连贯、语气风格是否一致、文化概念是否适配。微观检查关注日文假名残留、主语被动态是否颠倒、术语是否统一、是否有 API 拒绝消息等非台词文本混入。系统提示词中的上下文推断能力经过泛化优化：V3.0 要求 AI 先判断作品题材和舞台设定，再以此为基准检查不合理词汇；误听案例保留但标注为"仅供理解，不可套用"；新增通用的误听模式分类（同音异义词、场景矛盾词、拟声词混淆、专有名词误识别），适用于任何题材。终审支持跨文件并行。
+第四步 review_final.py 将全篇字幕（日中对）打包为一个整体发送给 LLM，同时从宏观和微观两个角度进行终审。宏观检查关注角色称呼是否统一、上下文是否连贯、语气风格是否一致、文化概念是否适配。微观检查关注日文假名残留、主语被动态是否颠倒、术语是否统一、是否有 API 拒绝消息等非台词文本混入。系统提示词中的上下文推断能力经过泛化优化：V3.0 要求 AI 先判断作品题材和舞台设定，再以此为基准检查不合理词汇；误听案例保留但标注为"仅供理解，不可套用"；新增通用的误听模式分类（同音异义词、场景矛盾词、拟声词混淆、专有名词误识别），适用于任何题材。终审支持跨文件并行。
 
 第五步 validate_final.py 是纯规则扫描，不调用任何 AI，几秒钟跑完。检查所有 _final.srt 文件中是否存在空译文、裸编号残留（如 [41]）、已知的 API 安全拒绝模板、硬省略标记（「（中略）」「（省略）」）、低置信度标记（「〔認識不良〕」「低信頼度」）、以及日语原文栏中残留的 AI 审校注释。硬省略标记属严重问题（返回非零退出码终止流水线）；低置信度标记属警告，提示人工复查但不阻断流程。V3.3 起移除中文译文中的日文假名残留检查（误报率高且实际意义有限）。
 
@@ -272,13 +284,13 @@ SCRIPT_DIR = "./scripts"         # 台本所在目录
 
 API Key 安全：真实 Key 存放在 .env 文件中，不要把 .env 发给别人；仓库中只提交 .env.example 模板。
 
-内容审查：本工具的转写（Whisper）和翻译（DeepSeek）均在本地或 API 端执行，无内容过滤。但将字幕上传到其他平台（如 B 站、YouTube）时仍需遵守对应平台的社区准则。联网搜索（Tavily/Exa）本身无内容审查环节，但请自行判断搜索内容是否符合两家服务的使用条款。
+内容审查：本工具的转写（Whisper）和翻译（LLM）均在本地或 API 端执行，无内容过滤。但将字幕上传到其他平台（如 B 站、YouTube）时仍需遵守对应平台的社区准则。联网搜索（Tavily/Exa）本身无内容审查环节，但请自行判断搜索内容是否符合两家服务的使用条款。
 
 模型选择：large-v3 加 large-v3-turbo 双模型融合是目前日语识别的最优方案。如果显存不足，低于 6GB，可以只使用 large-v3-turbo。
 
 时长限制：单次转写超过 3 小时的音频可能导致显存不足。建议用 ffmpeg 预先切割成 1 小时以内的片段。极短音频，低于 30 秒，转写效果可能不佳，因为 Whisper 对极短语音的上下文判断能力有限。
 
-费用说明：DeepSeek 按量计费，1 小时 ASMR 音频全程约 0.18 到 0.35 元人民币，视话密度和是否开启搜索。每个脚本跑完后自动打印精确费用报告，包含缓存命中率和按缓存命中与未命中分别计算的真实输入费用。联网搜索（Tavily/Exa）各有每月 1000 次免费额度，超出后按次计费（费用报告按约 $0.005/次粗略估算，实际单价以官网为准）；同一关键词缓存命中后不重复计费。全篇上下文审校会额外增加一次 API 调用，约 0.01 到 0.03 元。V3.0 并行处理不增加额外费用，只是缩短等待时间。
+费用说明：V3.6 起程序不再估算费用，仅统计 token 用量（每个脚本跑完后自动打印用量报告，含 LLM 调用次数、输入/输出 token、缓存命中率）。如需估算成本，可参考下文「性能参考」中的 DeepSeek 历史实测价格——1 小时 ASMR 音频全程约 0.18 到 0.35 元人民币，视话密度和是否开启搜索；换用其他服务商时请按其官网单价自行计算。联网搜索（Tavily/Exa）各有每月 1000 次免费额度，同一关键词缓存命中后不重复查询。全篇上下文审校会额外增加一次 API 调用。V3.0 并行处理不增加额外 API 调用次数，只是缩短等待时间。
 
 版本更新：以实际源码为准，部分小更新可能不会同步更新本文档。
 
@@ -313,7 +325,10 @@ Q：纯触发音或极短音频能处理吗。
 A：可以，但转写质量可能不佳。Whisper 对纯环境音（如掏耳、敲击）可能产生碎片化假阳性输出或者几乎无输出。日语二审和全篇上下文审校会尝试修正这些问题，但效果受限于原始音频质量。如果整段音频没有台词，成品字幕可能只有少数条目或完全为空，这属于正常现象而非脚本故障。
 
 Q：如何调整并行数。
-A：在 run_all.py 配置区修改 MAX_WORKERS。默认 10，DeepSeek API 并发限制为 500，可以放心调大。数值越大并行度越高、耗时越短，但对本地网络带宽和 CPU 调度压力也越大。
+A：在 run_all.py 配置区修改 MAX_WORKERS。默认 10（DeepSeek 的并发限制为 500，可放心调大；换用其他服务商时请按其限流调整）。数值越大并行度越高、耗时越短，但对本地网络带宽和 CPU 调度压力也越大。
+
+Q：更换 OpenAI 兼容服务后请求报错（400）。
+A：按顺序检查：① `.env` 的 `OPENAI_BASE_URL` / `OPENAI_MODEL` 是否与目标服务一致；② `OPENAI_ENABLE_THINKING` 是否已设 0（thinking 是 DeepSeek 专属参数，标准服务不认）；③ `OPENAI_MAX_TOKENS` 是否超过该服务的上限（如 gpt-4o 为 16384）；④ 个别小众兼容服务可能不支持 usage 统计扩展参数，此类服务建议换主流提供商。
 
 Q：没按键盘却提示收到 Ctrl+C，甚至启动时崩溃。
 A：个别机器上存在未知程序向控制台注入 Ctrl+C 信号。已通过 sitecustomize.py 防御（start.bat 经 PYTHONPATH 自动加载）：第 1 次 Ctrl+C 仅打印提示并忽略，流水线继续运行；连续第 2 次才会真正中断。命令行直接运行脚本时，需手动设置 PYTHONPATH 指向项目目录才能使防御生效。
@@ -322,14 +337,14 @@ A：个别机器上存在未知程序向控制台注入 Ctrl+C 信号。已通�
 
 ## 性能参考
 
-以下数据基于 RTX 4060，8GB 显存，搭配 32GB RAM，处理 3 个 1 小时 ASMR 音频（每个约 300 条字幕），关闭搜索功能。
+以下数据基于 RTX 4060，8GB 显存，搭配 32GB RAM，处理 3 个 1 小时 ASMR 音频（每个约 300 条字幕），关闭搜索功能。表中费用为 DeepSeek 历史实测价格（2026 年中水平，调价后请以官网为准），仅供参考（V3.6 起程序不再自动估算费用）。
 
 V3.1 并行处理（MAX_WORKERS=10）：
 
 | 步骤 | 耗时 | 费用 |
 |------|------|------|
 | Whisper 双模型转写（阶段1，串行 GPU 独占） | 约 30 分钟（3 文件） | 0 元 |
-| DeepSeek 融合（阶段2，跨文件并行） | 约 2 分钟 | 约 0.15 到 0.24 元 |
+| LLM 融合（阶段2，跨文件并行） | 约 2 分钟 | 约 0.15 到 0.24 元 |
 | 日语 AI 审校（跨文件并行） | 约 4 分钟 | 约 0.24 到 0.39 元 |
 | 翻译加逐段审校（跨文件并行） | 约 6 分钟 | 约 0.30 到 0.45 元 |
 | 全篇终审（跨文件并行） | 约 2 分钟 | 约 0.09 到 0.15 元 |
@@ -351,6 +366,10 @@ V3.1 并行处理（MAX_WORKERS=10）：
 ---
 
 ## 更新日志
+
+### V3.6.0
+
+LLM 接入改为 OpenAI 兼容格式：任意兼容服务（DeepSeek / OpenAI / 硅基流动 / Moonshot 等）均可通过 .env 的 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_MAX_TOKENS 配置，默认仍是 DeepSeek（未配置时与 V3.5 行为一致）。新增 OPENAI_ENABLE_THINKING 开关（默认 0）：thinking 是 DeepSeek 的非标准参数，标准服务不认——换用 OpenAI 等时保持 0，DeepSeek 用户建议设 1 开启思维链增强。旧 DEEPSEEK_API_KEY 自动回退兼容，无需迁移即可继续使用。启动横幅改为动态显示所配置的模型名。移除费用估算功能（LLM 服务商可换、单价多变）：用量报告改为只统计 token（调用次数、输入/输出 token、缓存命中率），不再显示费用；联网搜索只计数不估费。另有细节优化：get_llm_config 改模块级缓存（避免每轮 API 调用重复读环境变量）；新增 get_llm_client（旧 get_deepseek_client 保留为历史别名）；max_tokens 超限报错时自动提示调低 OPENAI_MAX_TOKENS；run_all 仅注入非空配置。
 
 ### V3.5.0
 
@@ -395,7 +414,7 @@ Whisper 转写准确率改进——新增音频预处理模块（librosa 读取 
 本项目依赖以下优秀的开源项目和服务：
 
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — OpenAI Whisper 模型的 CTranslate2 重写版，提供本地 GPU 语音转写能力（MIT 协议）
-- [DeepSeek](https://platform.deepseek.com) — 提供 DeepSeek-V4-Pro 大语言模型 API，用于翻译、审校和终审
+- [DeepSeek](https://platform.deepseek.com) — 默认 LLM 提供商，提供大语言模型 API，用于翻译、审校和终审（V3.6 起可通过 .env 更换为任意 OpenAI 兼容服务）
 - [Tavily](https://tavily.com) — 提供联网搜索 API，用于可选的联网搜索功能（每月 1000 次免费额度）
 - [Exa](https://exa.ai) — 提供联网搜索 API，用于可选的联网搜索功能（每月 1000 次免费额度）
 - [FFmpeg](https://ffmpeg.org) — 音视频解码，Whisper 读取音频的底层依赖
@@ -408,7 +427,7 @@ Whisper 转写准确率改进——新增音频预处理模块（librosa 读取 
 
 ## AI 参与说明
 
-本项目的所有 Python 脚本和文档初稿均由 deepseek-v4-pro(V2.0及以前)和GLM-5.2(V3.0至V3.4.1)根据人类作者的设计要求生成。人类作者负责：定义项目目标和应用场景、选定技术路线和架构方案、确定所有关键参数、测试和验证输出质量、以及做出发布和许可证决策
+本项目的所有 Python 脚本和文档初稿均由 AI 根据人类作者的设计要求生成：deepseek-v4-pro（V2.0 及以前）、GLM-5.2（V3.0 至 V3.4.1）、deepseek-v4-pro-0813（V3.5 起，含缺陷修复、搜索提供商替换、OpenAI 兼容化与文档整理）。人类作者负责：定义项目目标和应用场景、选定技术路线和架构方案、确定所有关键参数、测试和验证输出质量、以及做出发布和许可证决策
 
 ---
 

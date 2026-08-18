@@ -13,7 +13,7 @@ import sys
 import re
 import json
 import time
-from common import get_deepseek_client, call_deepseek, read_text_file
+from common import get_llm_client, call_deepseek, read_text_file
 
 # ====== 配置 ======
 AUDIO_DIR  = os.environ.get("AUDIO_DIR", "./audio")
@@ -265,7 +265,7 @@ def split_by_llm(merge_path, audio_names):
     except Exception:
         return None
 
-    client = get_deepseek_client()
+    client = get_llm_client()
     system_prompt = (
         "あなたは音声作品の台本分割エキスパートです。"
         "統合された台本を、指定された音声ファイルリストに対応するよう分割してください。\n"
@@ -310,7 +310,7 @@ def llm_match(unmatched_audios, candidate_scripts):
     script_names = [os.path.basename(p) for p in candidate_scripts]
     script_map = {os.path.basename(p): p for p in candidate_scripts}
 
-    client = get_deepseek_client()
+    client = get_llm_client()
     system_prompt = (
         "あなたは音声作品の台本マッチングエキスパートです。"
         "音声ファイル名リストと台本ファイル名リストを比較し、"

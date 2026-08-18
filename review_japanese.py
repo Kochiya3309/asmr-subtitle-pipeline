@@ -7,7 +7,7 @@ import json
 import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
-    get_deepseek_client, call_deepseek, parse_srt,
+    get_llm_client, call_deepseek, parse_srt,
     parse_review_result, OUTPUT_TOOL, try_extract_lines_from_analysis,
     reset_usage, get_usage_report
 )
@@ -281,7 +281,7 @@ def main():
         print(get_usage_report())
         return
 
-    client = get_deepseek_client()
+    client = get_llm_client()
 
     # ================================================================
     #  阶段一：逐批审校（跨文件+跨批次并行）
