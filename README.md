@@ -1,4 +1,4 @@
-# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.6.0）
+# ASMR 字幕自动生成流水线 — 使用说明（更新 V3.6.1）
 
 ## 这是什么？
 
@@ -6,7 +6,7 @@
 
 工作流程：音频 → Whisper 双模型转写日文字幕 → AI 审校日语错误 → 结合上下文审查可能的识别错误 → 翻译成中文 → AI 逐段审校翻译 → AI 全篇终审（宏观+微观） → 自动化规则验证 → 双语字幕 .srt 文件。
 
-当前版本 V3.6.0：LLM 接入改为 OpenAI 兼容格式，任意兼容服务（DeepSeek / OpenAI / 硅基流动 / Moonshot 等）均可通过 .env 配置使用，默认仍是 DeepSeek；联网搜索使用 Tavily + Exa 双引擎；无 NVIDIA GPU 的机器可自动回退 CPU 运行。历史版本变化详见文末「更新日志」。
+当前版本 V3.6.1：LLM 接入改为 OpenAI 兼容格式，任意兼容服务（DeepSeek / OpenAI / 硅基流动 / Moonshot 等）均可通过 .env 配置使用，默认仍是 DeepSeek；联网搜索使用 Tavily + Exa 双引擎；无 NVIDIA GPU 的机器可自动回退 CPU 运行。V3.6.1 修复了启动脚本（start_*.bat）在 V3.6 重写时的格式回归——此前双击启动脚本会立即报错、窗口极快关闭。历史版本变化详见文末「更新日志」。
 
 全程只需把音频放进文件夹，双击运行，等它跑完。用 PotPlayer / VLC / MPC 加载输出的字幕文件即可。
 
@@ -366,6 +366,10 @@ V3.1 并行处理（MAX_WORKERS=10）：
 ---
 
 ## 更新日志
+
+### V3.6.1
+
+修复 V3.6 引入的启动脚本格式回归。V3.6 重写 start_*.bat 时把 python 命令与 pause 误合并到同一行、且参数被错误地引进了文件名（如 `"rename_suffix.py _cn_only"` 被当成单个文件路径），导致双击启动脚本立即报错、窗口极快关闭。已重写全部 4 个启动脚本（start / rename_cn_only / rename_final / strip）：参数与命令分开、pause 独立成行、显式 CRLF 换行、内容保持纯 ASCII（cmd 按 GBK 解析 bat，UTF-8 中文注释会被当命令执行）。cmd 模拟执行验证通过。
 
 ### V3.6.0
 
