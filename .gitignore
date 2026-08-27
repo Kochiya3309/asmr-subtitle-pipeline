@@ -23,3 +23,10 @@ __pycache__/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# agent 生成产物缓存（测试/临时/调试文件集中放这里，不入库）
+_cache/
+
+# Codex / agent 本地配置（不随仓库提交，仅本机使用）
+AGENTS.md
+.codex/
