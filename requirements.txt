@@ -5,3 +5,5 @@ librosa>=0.10.0
 noisereduce>=3.0.0
 scipy>=1.11.0
 soundfile>=0.12.0
+# 人工复核页面的日文罗马音提示（仅辅助听辨，不参与 ASR 决策）
+pykakasi>=2.3.0

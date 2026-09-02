@@ -12,18 +12,28 @@ import os
 import sys
 import re
 import json
-import time
 from common import get_llm_client, call_deepseek, read_text_file
+from script_mapping_state import (
+    validate_mapping_verification, write_mapping_verification,
+)
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _project_path(value):
+    return value if os.path.isabs(value) else os.path.join(PROJECT_DIR, value)
+
 
 # ====== 配置 ======
-AUDIO_DIR  = os.environ.get("AUDIO_DIR", "./audio")
-SCRIPT_DIR = os.environ.get("SCRIPT_DIR", "./scripts")
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
+AUDIO_DIR  = _project_path(os.environ.get("AUDIO_DIR", "./audio"))
+SCRIPT_DIR = _project_path(os.environ.get("SCRIPT_DIR", "./scripts"))
+OUTPUT_DIR = _project_path(os.environ.get("OUTPUT_DIR", "./output"))
 SPLIT_DIR  = os.path.join(OUTPUT_DIR, "scripts_split")
 MAPPING_FILE = os.path.join(OUTPUT_DIR, "script_mapping.json")
 VERIFIED_FILE = os.path.join(OUTPUT_DIR, "script_mapping.verified")
 FORCE_RESPLIT = os.environ.get("SCRIPT_FORCE_RESPLIT", "0") == "1"
 FALLBACK_FULL = os.environ.get("SCRIPT_FALLBACK_FULL", "1") == "1"
+AUTO_VERIFY = os.environ.get("SCRIPT_AUTO_VERIFY", "0") == "1"
 AUDIO_EXTS = ['.mp3', '.m4a', '.wav', '.flac', '.ogg', '.opus']
 # ==================
 
@@ -351,6 +361,22 @@ def llm_match(unmatched_audios, candidate_scripts):
     return output
 
 
+def _verification_feedback():
+    if AUTO_VERIFY:
+        print("（SCRIPT_AUTO_VERIFY=1，自动确认）", flush=True)
+        return "y"
+    if sys.stdin.isatty():
+        try:
+            return input().strip().lower()
+        except EOFError:
+            return ""
+    print(
+        "（非交互式终端且 SCRIPT_AUTO_VERIFY=0，拒绝自动标记为人工验证通过）",
+        flush=True,
+    )
+    return ""
+
+
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(SPLIT_DIR, exist_ok=True)
@@ -387,7 +413,19 @@ def main():
     print()
 
     # 幂等检查：已验证且无变化则跳过
+    verification_stale = False
     if os.path.exists(VERIFIED_FILE) and not FORCE_RESPLIT:
+        try:
+            validate_mapping_verification(
+                VERIFIED_FILE, MAPPING_FILE, audio_files, PROJECT_DIR,
+            )
+            print("✅ 台本映射内容指纹与当前输入一致")
+        except Exception as e:
+            verification_stale = True
+            print(f"⚠ 台本映射验证已失效，将重新匹配：{e}")
+
+    # 继续检查未被 mapping 引用的新台本；新验证失效时不得回退接受。
+    if os.path.exists(VERIFIED_FILE) and not FORCE_RESPLIT and not verification_stale:
         need_redo = False
         reason = ""
         if os.path.exists(MAPPING_FILE):
@@ -447,6 +485,15 @@ def main():
         else:
             need_redo = True
             reason = "映射文件不存在"
+
+        if not need_redo:
+            try:
+                validate_mapping_verification(
+                    VERIFIED_FILE, MAPPING_FILE, collect_audio_files(), PROJECT_DIR,
+                )
+            except Exception as e:
+                print(f"⚠ 台本 mapping/脚本在缓存检查期间发生变化，将重新匹配：{e}")
+                need_redo = True
 
         if not need_redo:
             print("✅ 台本映射已存在且已验证，跳过")
@@ -742,21 +789,12 @@ def main():
             print(f"  └─")
 
     print(f"\n  确认无误输入 y 继续，有问题输入 n 退出：", end="", flush=True)
-    if sys.stdin.isatty():
-        try:
-            feedback = input().strip().lower()
-        except EOFError:
-            feedback = ""
-    else:
-        # 修复：非交互式终端（计划任务/CI/管道）下 input() 会立即 EOFError，
-        # 原逻辑按验证不通过处理 → sys.exit(1) → run_all.py 流水线在 STEP0
-        # 必失败。改为自动通过并给出醒目警告（与 run_all.py 结尾风格一致）。
-        feedback = "y"
-        print("（非交互式终端，跳过人工验证，自动通过）", flush=True)
+    feedback = _verification_feedback()
 
     if feedback == 'y':
-        with open(VERIFIED_FILE, "w", encoding="utf-8") as f:
-            f.write(f"verified at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        write_mapping_verification(
+            VERIFIED_FILE, MAPPING_FILE, audio_files, PROJECT_DIR,
+        )
         print("\n  ✅ 验证通过，可继续 ensemble 阶段")
     else:
         print("\n  ❌ 验证未通过，未创建验证标记")

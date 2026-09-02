@@ -7,9 +7,14 @@ import json
 import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
-    get_llm_client, call_deepseek, parse_srt,
+    get_llm_client, get_llm_config, call_deepseek, parse_srt,
     parse_review_result, OUTPUT_TOOL, try_extract_lines_from_analysis,
     reset_usage, get_usage_report
+)
+from asr_evidence import canonical_fingerprint
+from pipeline_cache import (
+    artifact_cache_is_current, backup_stale_artifacts,
+    commit_text_artifact, parse_file_snapshot,
 )
 
 # ====== 配置 ======
@@ -24,7 +29,28 @@ FULL_REVIEW_BATCH = int(os.environ.get("REVIEW_JP_FULL_REVIEW_BATCH", "200"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 # 台本模式下用于选择性审校（仅 mismatch 文件）
 MISMATCH_FILE = os.path.join(OUTPUT_DIR, "script_mismatch.json")
+REVIEW_JP_GENERATION_VERSION = "review-japanese-2026-08-29.1"
 # ==================
+
+
+def _review_generation_fingerprint():
+    _, base_url, model, enable_thinking, max_tokens = get_llm_config()
+    return canonical_fingerprint({
+        "version": REVIEW_JP_GENERATION_VERSION,
+        "tool": OUTPUT_TOOL,
+        "llm": {
+            "base_url": base_url,
+            "model": model,
+            "enable_thinking": enable_thinking,
+            "max_tokens": max_tokens,
+            "temperature": 0.25,
+        },
+        "search": ENABLE_SEARCH,
+        "batch_size": BATCH_SIZE,
+        "overlap": OVERLAP,
+        "full_review": ENABLE_FULL_REVIEW,
+        "full_review_batch": FULL_REVIEW_BATCH,
+    })
 
 
 def _build_japanese_corpus(subs, texts):
@@ -264,14 +290,23 @@ def main():
     for f in files:
         base = os.path.basename(f).replace("_ensemble.srt", "")
         output_path = os.path.join(OUTPUT_DIR, f"{base}_reviewed.srt")
+        manifest_path = os.path.join(OUTPUT_DIR, f"{base}_reviewed_manifest.json")
         if os.path.exists(output_path):
-            print(f"  ⏭ {base} 已存在，跳过")
-            continue
-        subs = parse_srt(f)
+            if artifact_cache_is_current(
+                manifest_path, "reviewed_srt_manifest", f, output_path,
+                _review_generation_fingerprint(),
+            ):
+                print(f"  ⏭ {base} 审校缓存有效，跳过")
+                continue
+            print(f"  ⚠ {base} 审校缓存来源已变化，备份旧产物后重建")
+            backup_stale_artifacts(output_path, manifest_path)
+        subs, input_sha256 = parse_file_snapshot(f, parse_srt)
         print(f"  📖 {base} — {len(subs)} 条")
         all_files_data.append({
             "base": base, "path": f, "subs": subs,
             "output_path": output_path,
+            "manifest_path": manifest_path,
+            "input_sha256": input_sha256,
             "reviewed": [None] * len(subs),
             "all_changes": []
         })
@@ -384,13 +419,17 @@ def main():
     print("  写入输出文件")
     print(f"{'='*60}\n")
     for fd in all_files_data:
-        with open(fd["output_path"], "w", encoding="utf-8") as f:
-            for sub, text in zip(fd["subs"], fd["reviewed"]):
-                f.write(
-                    f"{sub['index']}\n"
-                    f"{sub['start']} --> {sub['end']}\n"
-                    f"{text}\n\n"
-                )
+        srt_text = "".join(
+            f"{sub['index']}\n"
+            f"{sub['start']} --> {sub['end']}\n"
+            f"{text}\n\n"
+            for sub, text in zip(fd["subs"], fd["reviewed"])
+        )
+        commit_text_artifact(
+            fd["manifest_path"], "reviewed_srt_manifest", fd["path"],
+            fd["input_sha256"], fd["output_path"], srt_text,
+            _review_generation_fingerprint(),
+        )
         print(f"  ✅ {fd['output_path']} — 修正 {len(fd['all_changes'])} 处")
 
     print(f"\n🏁 日语二审全部完成！")

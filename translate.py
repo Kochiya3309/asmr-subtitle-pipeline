@@ -6,9 +6,14 @@ import time
 import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
-    get_llm_client, call_deepseek, parse_srt,
+    get_llm_client, get_llm_config, call_deepseek, parse_srt,
     parse_review_result, OUTPUT_TOOL,
     reset_usage, get_usage_report
+)
+from asr_evidence import canonical_fingerprint
+from pipeline_cache import (
+    artifact_cache_is_current, backup_stale_artifacts,
+    commit_text_artifact, parse_file_snapshot,
 )
 
 # ====== 配置 ======
@@ -18,7 +23,44 @@ ENABLE_SEARCH_IN_REVIEW = os.environ.get("ENABLE_SEARCH", "1") == "1"
 TRANSLATE_BATCH_SIZE = int(os.environ.get("TRANSLATE_BATCH_SIZE", "10"))
 TRANSLATE_REVIEW_BATCH_SIZE = int(os.environ.get("TRANSLATE_REVIEW_BATCH_SIZE", "20"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
+TRANSLATE_GENERATION_VERSION = "translate-review-2026-08-29.1"
 # ==================
+
+
+def _translate_generation_fingerprint():
+    _, base_url, model, enable_thinking, max_tokens = get_llm_config()
+    return canonical_fingerprint({
+        "version": TRANSLATE_GENERATION_VERSION,
+        "tool": OUTPUT_TOOL,
+        "llm": {
+            "base_url": base_url,
+            "model": model,
+            "enable_thinking": enable_thinking,
+            "max_tokens": max_tokens,
+            "temperature": 0.25,
+        },
+        "search_in_review": ENABLE_SEARCH_IN_REVIEW,
+        "translate_batch_size": TRANSLATE_BATCH_SIZE,
+        "review_batch_size": TRANSLATE_REVIEW_BATCH_SIZE,
+    })
+
+
+def select_translation_inputs(ensemble_files):
+    files = []
+    fallback_count = 0
+    for ensemble_path in ensemble_files:
+        base = os.path.basename(ensemble_path).replace("_ensemble.srt", "")
+        reviewed = os.path.join(INPUT_DIR, f"{base}_reviewed.srt")
+        reviewed_manifest = os.path.join(INPUT_DIR, f"{base}_reviewed_manifest.json")
+        if artifact_cache_is_current(
+            reviewed_manifest, "reviewed_srt_manifest",
+            ensemble_path, reviewed, None,
+        ):
+            files.append(reviewed)
+        else:
+            files.append(ensemble_path)
+            fallback_count += 1
+    return files, fallback_count
 
 
 # ============================================================
@@ -160,16 +202,7 @@ def main():
         print(f"❌ 未找到 {ensemble_pattern}")
         sys.exit(1)
 
-    files = []
-    fallback_count = 0
-    for ef in ensemble_files:
-        base = os.path.basename(ef).replace("_ensemble.srt", "")
-        reviewed = os.path.join(INPUT_DIR, f"{base}_reviewed.srt")
-        if os.path.exists(reviewed):
-            files.append(reviewed)
-        else:
-            files.append(ef)
-            fallback_count += 1
+    files, fallback_count = select_translation_inputs(ensemble_files)
 
     print("=" * 60)
     print("  翻译 + 逐段审校 — 批量日→中")
@@ -188,14 +221,23 @@ def main():
     for f in files:
         base = os.path.basename(f).replace("_reviewed.srt", "").replace("_ensemble.srt", "")
         output_path = os.path.join(OUTPUT_DIR, f"{base}_zh.srt")
+        manifest_path = os.path.join(OUTPUT_DIR, f"{base}_zh_manifest.json")
         if os.path.exists(output_path):
-            print(f"  ⏭ {base} 已存在，跳过")
-            continue
-        subs = parse_srt(f)
+            if artifact_cache_is_current(
+                manifest_path, "translated_srt_manifest", f, output_path,
+                _translate_generation_fingerprint(),
+            ):
+                print(f"  ⏭ {base} 翻译缓存有效，跳过")
+                continue
+            print(f"  ⚠ {base} 翻译缓存来源已变化，备份旧产物后重建")
+            backup_stale_artifacts(output_path, manifest_path)
+        subs, input_sha256 = parse_file_snapshot(f, parse_srt)
         print(f"  📖 {base} — {len(subs)} 条")
         all_files_data.append({
             "base": base, "path": f, "subs": subs,
             "output_path": output_path,
+            "manifest_path": manifest_path,
+            "input_sha256": input_sha256,
             "translated": [],
             "revised": []
         })
@@ -336,14 +378,18 @@ def main():
     print("  写入输出文件")
     print(f"{'='*60}\n")
     for fd in all_files_data:
-        with open(fd["output_path"], "w", encoding="utf-8") as f:
-            for sub, zh in zip(fd["subs"], fd["revised"]):
-                f.write(
-                    f"{sub['index']}\n"
-                    f"{sub['start']} --> {sub['end']}\n"
-                    f"{sub['text']}\n"
-                    f"{zh}\n\n"
-                )
+        srt_text = "".join(
+            f"{sub['index']}\n"
+            f"{sub['start']} --> {sub['end']}\n"
+            f"{sub['text']}\n"
+            f"{zh}\n\n"
+            for sub, zh in zip(fd["subs"], fd["revised"])
+        )
+        commit_text_artifact(
+            fd["manifest_path"], "translated_srt_manifest", fd["path"],
+            fd["input_sha256"], fd["output_path"], srt_text,
+            _translate_generation_fingerprint(),
+        )
         changed_count = sum(
             1 for t, r in zip(fd["translated"], fd["revised"])
             if t.strip() != r.strip()

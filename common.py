@@ -7,6 +7,7 @@ import re
 import hashlib
 import builtins
 from openai import OpenAI
+from script_text_io import read_script_text_exact
 
 # ======================================================================
 #  文件日志（通过 monkey-patch builtins.print 实现）
@@ -830,21 +831,8 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def read_text_file(path):
-    """尝试多种编码读取文本文件（UTF-8 优先，兼容 Shift-JIS/cp932/euc-jp）。
-    V3.2 新增：用于读取发行商提供的日语台本（多为 Shift-JIS 编码）。"""
-    encodings = ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis', 'euc-jp']
-    for enc in encodings:
-        try:
-            with open(path, "r", encoding=enc) as f:
-                content = f.read()
-            # 校验：替换字符占比 < 1% 才视为解码成功
-            if content.count('\ufffd') < len(content) * 0.01:
-                return content
-        except UnicodeDecodeError:
-            continue
-    # 全部失败则用 utf-8 忽略错误
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
+    """无损读取发行商台本，兼容单编码及按行拼接的混合编码文件。"""
+    return read_script_text_exact(path)
 
 def parse_srt(filepath):
     with open(filepath, "r", encoding="utf-8") as f:

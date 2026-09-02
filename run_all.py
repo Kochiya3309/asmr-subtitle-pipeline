@@ -5,6 +5,37 @@ import sys
 import json
 import subprocess
 
+
+PIPELINE_PAUSE_EXIT_CODE = 75
+
+
+def _bool_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _positive_int_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _port_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if 0 <= value <= 65535 else default
+
 # 设置日志文件路径（必须在 import common 之前）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("LOG_FILE", os.path.join(_SCRIPT_DIR, "output", "pipeline.log"))
@@ -37,22 +68,38 @@ EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 
 # 修复：改为绝对路径。相对路径依赖 cwd，用户从其他目录直接运行脚本时
 # 会静默写错位置（subprocess 虽设置了 cwd，但直接运行单个脚本时无保护）。
-AUDIO_DIR = os.path.join(_SCRIPT_DIR, "audio")
-OUTPUT_DIR = os.path.join(_SCRIPT_DIR, "output")
+AUDIO_DIR = os.path.abspath(os.environ.get("AUDIO_DIR", os.path.join(_SCRIPT_DIR, "audio")))
+OUTPUT_DIR = os.path.abspath(os.environ.get("OUTPUT_DIR", os.path.join(_SCRIPT_DIR, "output")))
 
-ENABLE_SEARCH = False
+ENABLE_SEARCH = _bool_env("ENABLE_SEARCH", False)
 
 MAX_WORKERS = 10              # LLM API 并发数
 
 # 台本功能（V3.2 新增）
-ENABLE_SCRIPT = False             # 总开关，False 时整条台本流程跳过
-STEP0_MATCH_SCRIPTS = False       # STEP0 开关
-SCRIPT_DIR = "./scripts"          # 台本目录
-SCRIPT_FALLBACK_FULL = True       # 合并台本无法拆分时整本发送
-SCRIPT_FORCE_RESPLIT = False      # 强制重新拆分（忽略缓存）
+ENABLE_SCRIPT = _bool_env("ENABLE_SCRIPT", False)
+STEP0_MATCH_SCRIPTS = _bool_env("STEP0_MATCH_SCRIPTS", False)
+SCRIPT_DIR = os.path.abspath(
+    os.environ.get("SCRIPT_DIR", os.path.join(_SCRIPT_DIR, "scripts"))
+)
+SCRIPT_FALLBACK_FULL = _bool_env("SCRIPT_FALLBACK_FULL", True)
+SCRIPT_FORCE_RESPLIT = _bool_env("SCRIPT_FORCE_RESPLIT", False)
+SCRIPT_AUTO_VERIFY = _bool_env("SCRIPT_AUTO_VERIFY", False)
+ENABLE_SCRIPT_REVIEW_FILTER = _bool_env("ENABLE_SCRIPT_REVIEW_FILTER", False)
+ENABLE_SCRIPT_UNITS_SHADOW = _bool_env("ENABLE_SCRIPT_UNITS_SHADOW", False)
+SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS = _positive_int_env(
+    "SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS", 120,
+)
 
 # Whisper 转写优化（V3.4 新增）
-ENABLE_AUDIO_PREPROCESS = True    # 音频预处理（降噪+归一化+高通滤波）
+ENABLE_AUDIO_PREPROCESS = _bool_env("ENABLE_AUDIO_PREPROCESS", True)
+ENABLE_ASR_EVIDENCE = _bool_env("ENABLE_ASR_EVIDENCE", True)
+ENABLE_HALLUCINATION_FILTER = _bool_env("ENABLE_HALLUCINATION_FILTER", True)
+ENABLE_ASR_RESCUE = _bool_env("ENABLE_ASR_RESCUE", True)
+ENABLE_DETERMINISTIC_TIMELINE = _bool_env("ENABLE_DETERMINISTIC_TIMELINE", False)
+ENABLE_HUMAN_REVIEW = _bool_env("ENABLE_HUMAN_REVIEW", False)
+HUMAN_REVIEW_PORT = _port_env("HUMAN_REVIEW_PORT", 8765)
+RESCUE_WINDOW_SECONDS = 12.0      # large-v3 无 VAD 扫描窗口
+RESCUE_OVERLAP_SECONDS = 2.0      # 相邻救援窗口重叠
 INITIAL_PROMPT = "ASMR作品、囁き、耳かき、癒し系、日本語、優しい声"
 HOTWORDS = "触手,媚薬,絶頂,雌,自縛,おまんこ,クリトリス,チンチン,囁き,耳舐め,サキュバス,乳首,睾丸,愛液,潮吹き"
 VAD_THRESHOLD = 0.2               # VAD 语音检测阈值（越低越敏感）
@@ -62,12 +109,18 @@ VAD_MIN_SILENCE_MS = 500          # 触发分割的最短静音（ms）
 
 # 流水线步骤开关
 STEP0_MATCH_SCRIPTS = STEP0_MATCH_SCRIPTS and ENABLE_SCRIPT
-STEP1_ENSEMBLE = True
-STEP2_REVIEW_JP = True
-STEP3_TRANSLATE = True
-STEP4_FINAL = True
-STEP5_VALIDATE = True
-STEP6_STRIP = True          # 去除日文仅留中文
+STEP1_ENSEMBLE = _bool_env("STEP1_ENSEMBLE", True)
+STEP2_REVIEW_JP = _bool_env("STEP2_REVIEW_JP", True)
+STEP3_TRANSLATE = _bool_env("STEP3_TRANSLATE", True)
+STEP325_SCRIPT_REVIEW_ALIGNMENT = (
+    ENABLE_SCRIPT and ENABLE_HUMAN_REVIEW and ENABLE_SCRIPT_REVIEW_FILTER
+)
+STEP35_HUMAN_REVIEW = (
+    ENABLE_HUMAN_REVIEW and _bool_env("STEP35_HUMAN_REVIEW", True)
+)
+STEP4_FINAL = _bool_env("STEP4_FINAL", True)
+STEP5_VALIDATE = _bool_env("STEP5_VALIDATE", True)
+STEP6_STRIP = _bool_env("STEP6_STRIP", True)
 
 # 日语二审参数
 REVIEW_JP_BATCH_SIZE = 30          # 逐批审校每批条数
@@ -114,7 +167,19 @@ def get_env():
     env["SCRIPT_DIR"] = SCRIPT_DIR
     env["SCRIPT_FALLBACK_FULL"] = "1" if SCRIPT_FALLBACK_FULL else "0"
     env["SCRIPT_FORCE_RESPLIT"] = "1" if SCRIPT_FORCE_RESPLIT else "0"
+    env["SCRIPT_AUTO_VERIFY"] = "1" if SCRIPT_AUTO_VERIFY else "0"
+    env["ENABLE_SCRIPT_REVIEW_FILTER"] = "1" if ENABLE_SCRIPT_REVIEW_FILTER else "0"
+    env["ENABLE_SCRIPT_UNITS_SHADOW"] = "1" if ENABLE_SCRIPT_UNITS_SHADOW else "0"
+    env["SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS"] = str(SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS)
     env["ENABLE_AUDIO_PREPROCESS"] = "1" if ENABLE_AUDIO_PREPROCESS else "0"
+    env["ENABLE_ASR_EVIDENCE"] = "1" if ENABLE_ASR_EVIDENCE else "0"
+    env["ENABLE_HALLUCINATION_FILTER"] = "1" if ENABLE_HALLUCINATION_FILTER else "0"
+    env["ENABLE_ASR_RESCUE"] = "1" if ENABLE_ASR_RESCUE else "0"
+    env["ENABLE_DETERMINISTIC_TIMELINE"] = "1" if ENABLE_DETERMINISTIC_TIMELINE else "0"
+    env["ENABLE_HUMAN_REVIEW"] = "1" if ENABLE_HUMAN_REVIEW else "0"
+    env["HUMAN_REVIEW_PORT"] = str(HUMAN_REVIEW_PORT)
+    env["RESCUE_WINDOW_SECONDS"] = str(RESCUE_WINDOW_SECONDS)
+    env["RESCUE_OVERLAP_SECONDS"] = str(RESCUE_OVERLAP_SECONDS)
     env["INITIAL_PROMPT"] = INITIAL_PROMPT
     env["HOTWORDS"] = HOTWORDS
     env["VAD_THRESHOLD"] = str(VAD_THRESHOLD)
@@ -124,18 +189,29 @@ def get_env():
     return env
 
 
-def run_step(step_num, total_steps, step_name, script_name, env):
+def run_step(step_num, total_steps, step_name, script_name, env, *, timeout=None):
     print()
     print("=" * 60)
     print(f"  [{step_num}/{total_steps}] {step_name}")
     print("=" * 60)
     print()
 
-    result = subprocess.run(
-        [sys.executable, script_name],
-        env=env,
-        cwd=os.path.dirname(os.path.abspath(__file__))
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, script_name],
+            env=env,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print()
+        print(f"*** 错误：{step_name} 超过 {timeout} 秒，已停止 ***")
+        sys.exit(1)
+    if result.returncode == PIPELINE_PAUSE_EXIT_CODE:
+        print()
+        print(f"[ PAUSED ] {step_name} 已暂停；再次运行将从缓存恢复")
+        print()
+        return False
     if result.returncode != 0:
         print()
         print(f"*** 错误：{step_name} 失败！ ***")
@@ -144,6 +220,54 @@ def run_step(step_num, total_steps, step_name, script_name, env):
     print()
     print(f"[ OK ] {step_name} 完成")
     print()
+    return True
+
+
+def run_optional_script_units_shadow(env):
+    """Run script classification only after every production subtitle step."""
+    if (
+        not ENABLE_SCRIPT
+        or not ENABLE_SCRIPT_UNITS_SHADOW
+        or STEP325_SCRIPT_REVIEW_ALIGNMENT
+    ):
+        return
+    print()
+    print("=" * 60)
+    print("  [旁路] 台本结构影子分析（不参与本轮字幕）")
+    print("=" * 60)
+    try:
+        result = subprocess.run(
+            [sys.executable, "script_units_shadow_stage.py"],
+            env=env,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            timeout=SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            print(f"    警告：台本结构影子分析退出码 {result.returncode}；正式字幕不受影响")
+    except subprocess.TimeoutExpired:
+        print(
+            f"    警告：台本结构影子分析超过 {SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS}s，"
+            "已终止；正式字幕不受影响"
+        )
+    except (OSError, ValueError) as exc:
+        print(f"    警告：无法启动台本结构影子分析（{exc}）；正式字幕不受影响")
+
+
+def load_script_mismatches():
+    """读取本轮 STEP1 产出的 mismatch 列表；缺失或损坏时失败关闭。"""
+    mismatch_file = os.path.join(OUTPUT_DIR, "script_mismatch.json")
+    if not os.path.exists(mismatch_file):
+        print("    警告：本轮未生成 script_mismatch.json，将执行 STEP2")
+        return None
+    try:
+        with open(mismatch_file, "r", encoding="utf-8-sig") as f:
+            value = json.load(f)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError("mismatch 列表格式无效")
+        return value
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as e:
+        print(f"    警告：无法验证本轮 mismatch 状态（{e}），将执行 STEP2")
+        return None
 
 
 def main():
@@ -164,28 +288,35 @@ def main():
         (STEP1_ENSEMBLE, "Whisper 双模型融合转写",        "ensemble_transcribe.py"),
         (STEP2_REVIEW_JP, "日语字幕二审",                  "review_japanese.py"),
         (STEP3_TRANSLATE,  "翻译 + 逐段审校",              "translate.py"),
+        (
+            STEP325_SCRIPT_REVIEW_ALIGNMENT,
+            "台本结构分类与审核对齐",
+            "script_units_shadow_stage.py",
+        ),
+        (STEP35_HUMAN_REVIEW, "人工复核（本地浏览器）",      "human_review_gate.py"),
         (STEP4_FINAL,      "全篇终审（宏观+微观一致性检查）", "review_final.py"),
         (STEP5_VALIDATE,   "自动化验证（规则扫描残留问题）",  "validate_final.py"),
         (STEP6_STRIP,      "去除日文（仅保留中文）",        "strip_japanese.py"),
     ]
 
-    # 分两阶段：先跑 STEP0+STEP1，再根据 mismatch 决定是否跑 STEP2，最后跑剩余
+    # 分两阶段：必须先跑 STEP0+STEP1，再读取本轮 mismatch 决定是否跑 STEP2。
     pre_steps = [(name, script) for flag, name, script in all_steps[:2] if flag]
     mid_step = all_steps[2]  # STEP2
     post_steps = [(name, script) for flag, name, script in all_steps[3:] if flag]
 
-    # 决定 STEP2 是否运行（台本模式下基于 mismatch 文件）
+    executed = 0
+    for name, script in pre_steps:
+        executed += 1
+        # 此时本轮 STEP2 是否启用尚未知，先明确显示未知总步数。
+        if run_step(executed, "?", name, script, env) is False:
+            return
+
+    # STEP1 已完成，现在读取它刚写出的 mismatch 文件。
     run_step2 = False
     if STEP2_REVIEW_JP:
         if ENABLE_SCRIPT:
-            mismatch_file = os.path.join(OUTPUT_DIR, "script_mismatch.json")
-            if os.path.exists(mismatch_file):
-                try:
-                    with open(mismatch_file, "r", encoding="utf-8") as f:
-                        mismatch_list = json.load(f)
-                    run_step2 = bool(mismatch_list)
-                except Exception:
-                    run_step2 = True
+            mismatch_list = load_script_mismatches()
+            run_step2 = mismatch_list is None or bool(mismatch_list)
             if run_step2:
                 print(f"    检测到台本 mismatch，将执行 STEP2（仅审校 mismatch 文件）")
             else:
@@ -195,18 +326,21 @@ def main():
 
     total = len(pre_steps) + (1 if run_step2 else 0) + len(post_steps)
 
-    executed = 0
-    for name, script in pre_steps:
-        executed += 1
-        run_step(executed, total, name, script, env)
-
     if run_step2:
         executed += 1
-        run_step(executed, total, mid_step[1], mid_step[2], env)
+        if run_step(executed, total, mid_step[1], mid_step[2], env) is False:
+            return
 
     for name, script in post_steps:
         executed += 1
-        run_step(executed, total, name, script, env)
+        kwargs = {}
+        if script == "script_units_shadow_stage.py":
+            kwargs["timeout"] = SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS
+        if run_step(executed, total, name, script, env, **kwargs) is False:
+            return
+
+    # It deliberately runs last so its API usage cannot starve production stages.
+    run_optional_script_units_shadow(env)
 
     print()
     print("=" * 60)
@@ -217,8 +351,17 @@ def main():
     print(f"      *_ensemble.srt   -- Whisper 双模型融合字幕（日语）")
     print(f"      *_reviewed.srt   -- 日语二审后字幕")
     print(f"      *_zh.srt         -- translate + 审校双语字幕")
+    if ENABLE_HUMAN_REVIEW:
+        print(f"      *_human_reviewed.srt -- 人工复核后的双语字幕")
+        print(f"      *_human_review.json  -- 人工复核完成标记与审计记录")
     print(f"      *_final.srt      -- 全篇终审终稿（用这个观看）")
+    print(f"      *_final_manifest.json -- 终审输入来源与缓存指纹")
     print(f"      *_cn_only.srt    -- 纯中文字幕（需开启 STEP6）")
+    if ENABLE_SCRIPT and (
+        ENABLE_SCRIPT_UNITS_SHADOW or ENABLE_SCRIPT_REVIEW_FILTER
+    ):
+        print(f"      *_script_units.json -- 台本结构分类")
+        print(f"      *_script_alignment.json -- 台本/ASR 时间窗对齐")
     print()
     print("    用播放器加载 *_final.srt 即可观看")
     print()

@@ -4,18 +4,31 @@ import re
 import os
 import sys
 import glob
+import json
 import shutil
+import time
+import tempfile
+import hashlib
+import unicodedata
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
-    get_llm_client, call_deepseek, parse_srt_full,
+    get_llm_client, get_llm_config, call_deepseek, parse_srt_full,
     reset_usage, get_usage_report
 )
+from human_review import validate_completed_review_outputs
+from pipeline_inputs import discover_active_audio
+from review_app import build_bundle_for_base
+from asr_evidence import canonical_fingerprint, write_json_atomic
 
 INPUT_DIR  = os.environ.get("OUTPUT_DIR", "./output")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./output")
 PATTERN    = "*_zh.srt"
 ENABLE_SEARCH = os.environ.get("ENABLE_SEARCH", "1") == "1"
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
+ENABLE_HUMAN_REVIEW = os.environ.get("ENABLE_HUMAN_REVIEW", "0") == "1"
+FINAL_REVIEW_GENERATION_VERSION = "final-review-manifest-v1"
+FINAL_REVIEW_PROMPT_VERSION = "final-review-prompt-2026-08-28"
 
 CORRECTION_TOOL = {
     "type": "function",
@@ -51,8 +64,87 @@ def parse_corrections_from_text(raw_text):
     corrections = {}
     for m in p.finditer(raw_text):
         idx = int(m.group(1))
+        if idx in corrections:
+            raise ValueError(f"终审修正包含重复 index：{idx}")
         corrections[idx] = {"issue": m.group(2).strip(), "fix": m.group(3).strip()}
     return corrections
+
+
+def _safe_final_translation(value, *, field="fix"):
+    if not isinstance(value, str):
+        raise ValueError(f"终审 {field} 必须是字符串")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"终审 {field} 不能为空")
+    if "\n" in text or "\r" in text or "-->" in text:
+        raise ValueError(f"终审 {field} 不得包含 SRT 结构")
+    if any(unicodedata.category(char) == "Cc" for char in text):
+        raise ValueError(f"终审 {field} 包含控制字符")
+    return text
+
+
+def _validate_corrections(raw_corrections, valid_indices):
+    if isinstance(raw_corrections, dict):
+        rows = [
+            {"index": index, **value}
+            for index, value in raw_corrections.items()
+            if isinstance(value, dict)
+        ]
+        if len(rows) != len(raw_corrections):
+            raise ValueError("终审修正格式无效")
+    elif isinstance(raw_corrections, list):
+        rows = raw_corrections
+    else:
+        raise ValueError("终审修正必须是数组或映射")
+
+    corrections = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("终审修正条目必须是对象")
+        index = row.get("index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("终审修正 index 必须是整数")
+        if index not in valid_indices:
+            raise ValueError(f"终审修正引用未知 index：{index}")
+        if index in corrections:
+            raise ValueError(f"终审修正包含重复 index：{index}")
+        issue = row.get("issue", "")
+        if not isinstance(issue, str) or any(
+            unicodedata.category(char) == "Cc" and char not in "\t"
+            for char in issue
+        ):
+            raise ValueError(f"终审 issue 格式无效：{index}")
+        corrections[index] = {
+            "issue": issue.strip(),
+            "fix": _safe_final_translation(row.get("fix"), field=f"fix[{index}]"),
+        }
+    return corrections
+
+
+def _validate_final_srt_text(srt_text, expected_subs):
+    normalized = srt_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if any(unicodedata.category(char) == "Cc" and char not in "\n\t" for char in normalized):
+        raise ValueError("终审 SRT 包含控制字符")
+    blocks = re.split(r"\n{2,}", normalized) if normalized else []
+    if len(blocks) != len(expected_subs):
+        raise ValueError(f"终审 SRT 条目数异常：{len(blocks)}/{len(expected_subs)}")
+    seen = set()
+    for block, expected in zip(blocks, expected_subs):
+        lines = block.split("\n")
+        if len(lines) != 4:
+            raise ValueError("终审 SRT 每条必须严格包含 index、时间轴、日文、中文四行")
+        try:
+            index = int(lines[0])
+        except ValueError as exc:
+            raise ValueError("终审 SRT index 无效") from exc
+        if index in seen or index != expected["index"]:
+            raise ValueError("终审 SRT index 重复或顺序变化")
+        seen.add(index)
+        if lines[1] != expected["timecode"]:
+            raise ValueError(f"终审不得修改时间轴：{index}")
+        if lines[2] != expected["text_ja"]:
+            raise ValueError(f"终审不得修改日文：{index}")
+        _safe_final_translation(lines[3], field=f"中文[{index}]")
 
 def build_corpus_view(subs):
     lines = []
@@ -63,16 +155,158 @@ def build_corpus_view(subs):
         lines.append("")
     return "\n".join(lines)
 
-def process_one_file(input_path, log_prefix=""):
-    base = os.path.basename(input_path).replace("_zh.srt", "")
+def _file_fingerprint(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _final_generation_fingerprint():
+    _, base_url, model, enable_thinking, max_tokens = get_llm_config()
+    return canonical_fingerprint({
+        "generation_version": FINAL_REVIEW_GENERATION_VERSION,
+        "prompt_version": FINAL_REVIEW_PROMPT_VERSION,
+        "correction_tool": CORRECTION_TOOL,
+        "enable_search": ENABLE_SEARCH,
+        "base_url": base_url,
+        "model": model,
+        "thinking": enable_thinking,
+        "max_tokens": max_tokens,
+        "temperature": 0.25,
+    })
+
+
+def _final_manifest_path(output_path):
+    return output_path[:-len("_final.srt")] + "_final_manifest.json"
+
+
+def final_cache_is_current(output_path, input_path):
+    manifest_path = _final_manifest_path(output_path)
+    if not os.path.isfile(output_path) or not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    required = {
+        "schema_version", "artifact_type", "status", "generation_fingerprint",
+        "input_srt_name", "input_srt_fingerprint", "output_srt_name",
+        "output_srt_fingerprint",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != required:
+        return False
+    if (
+        manifest["schema_version"] != 1
+        or manifest["artifact_type"] != "final_review_manifest"
+        or manifest["status"] != "complete"
+        or manifest["generation_fingerprint"] != _final_generation_fingerprint()
+        or manifest["input_srt_name"] != os.path.basename(input_path)
+        or manifest["output_srt_name"] != os.path.basename(output_path)
+    ):
+        return False
+    try:
+        return (
+            manifest["input_srt_fingerprint"] == _file_fingerprint(input_path)
+            and manifest["output_srt_fingerprint"] == _file_fingerprint(output_path)
+        )
+    except OSError:
+        return False
+
+
+def _snapshot_review_input(input_path):
+    with open(input_path, "rb") as handle:
+        raw = handle.read()
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    text = raw.decode("utf-8-sig")
+    snapshot_dir = os.path.dirname(os.path.abspath(input_path))
+    fd, snapshot_path = tempfile.mkstemp(
+        prefix=".final-input-snapshot-", suffix=".srt", dir=snapshot_dir,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        subs, _ = parse_srt_full(snapshot_path)
+    finally:
+        try:
+            os.unlink(snapshot_path)
+        except OSError:
+            pass
+    if not subs:
+        raise ValueError(f"终审输入未解析出有效双语字幕：{input_path}")
+    return text, fingerprint, subs
+
+
+def _commit_final_output(
+    output_path,
+    input_path,
+    input_snapshot_fingerprint,
+    srt_text,
+    expected_subs,
+):
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".final-review-", suffix=".srt", dir=output_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(srt_text)
+        _validate_final_srt_text(srt_text, expected_subs)
+        if _file_fingerprint(input_path) != input_snapshot_fingerprint:
+            raise ValueError("终审输入在处理期间发生变化，拒绝提交旧快照结果")
+        staged_output_fingerprint = _file_fingerprint(temp_path)
+        manifest_path = _final_manifest_path(output_path)
+        if os.path.exists(output_path):
+            backup_dir = os.path.join(output_dir, "_review_backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_suffix = time.time_ns()
+            backup_path = os.path.join(
+                backup_dir, f"{os.path.basename(output_path)}.{backup_suffix}.bak",
+            )
+            shutil.copy2(output_path, backup_path)
+            if os.path.exists(manifest_path):
+                shutil.copy2(
+                    manifest_path,
+                    os.path.join(
+                        backup_dir,
+                        f"{os.path.basename(manifest_path)}.{backup_suffix}.bak",
+                    ),
+                )
+        manifest = {
+            "schema_version": 1,
+            "artifact_type": "final_review_manifest",
+            "status": "complete",
+            "generation_fingerprint": _final_generation_fingerprint(),
+            "input_srt_name": os.path.basename(input_path),
+            "input_srt_fingerprint": input_snapshot_fingerprint,
+            "output_srt_name": os.path.basename(output_path),
+            "output_srt_fingerprint": staged_output_fingerprint,
+        }
+        write_json_atomic(manifest_path, manifest)
+        os.replace(temp_path, output_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def process_one_file(input_path, log_prefix="", force=False):
+    base = os.path.basename(input_path)
+    if base.endswith("_human_reviewed.srt"):
+        base = base[:-len("_human_reviewed.srt")]
+    else:
+        base = base.replace("_zh.srt", "")
     output_path = os.path.join(OUTPUT_DIR, f"{base}_final.srt")
 
-    if os.path.exists(output_path):
+    if os.path.exists(output_path) and not force:
         print(f"{log_prefix}⏭ 已存在，跳过")
         return output_path
 
     print(f"{log_prefix}📖 {input_path}")
-    subs, _ = parse_srt_full(input_path)
+    input_snapshot_text, input_snapshot_fingerprint, subs = _snapshot_review_input(input_path)
     total = len(subs)
     print(f"{log_prefix}   共 {total} 条字幕")
 
@@ -155,28 +389,31 @@ def process_one_file(input_path, log_prefix=""):
         return None
 
     corrections = {}
+    valid_indices = {sub["index"] for sub in subs}
 
     if isinstance(result, list):
-        for c in result:
-            idx = c.get("index", 0)
-            if idx > 0:
-                corrections[idx] = {
-                    "issue": c.get("issue", ""),
-                    "fix": c.get("fix", "")
-                }
+        corrections = _validate_corrections(result, valid_indices)
         if len(corrections) == 0:
             print(f"{log_prefix}✅ AI 判定：全篇无需修改！")
-            shutil.copy(input_path, output_path)
+            _commit_final_output(
+                output_path, input_path, input_snapshot_fingerprint,
+                input_snapshot_text, subs,
+            )
             print(f"{log_prefix}   {output_path}（与二审稿相同）")
             return output_path
 
     elif isinstance(result, str):
         if "无需修改" in result:
             print(f"{log_prefix}✅ AI 判定：全篇无需修改！")
-            shutil.copy(input_path, output_path)
+            _commit_final_output(
+                output_path, input_path, input_snapshot_fingerprint,
+                input_snapshot_text, subs,
+            )
             print(f"{log_prefix}   {output_path}（与二审稿相同）")
             return output_path
-        corrections = parse_corrections_from_text(result)
+        corrections = _validate_corrections(
+            parse_corrections_from_text(result), valid_indices,
+        )
 
     if not corrections:
         print(f"{log_prefix}⚠ 未能解析出修正条目")
@@ -202,25 +439,64 @@ def process_one_file(input_path, log_prefix=""):
         if idx in sub_map:
             sub_map[idx]["text_zh"] = c["fix"]
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        for s in subs:
-            f.write(
-                f"{s['index']}\n"
-                f"{s['timecode']}\n"
-                f"{s['text_ja']}\n"
-                f"{s['text_zh']}\n\n"
-            )
+    srt_text = "".join(
+        f"{s['index']}\n"
+        f"{s['timecode']}\n"
+        f"{s['text_ja']}\n"
+        f"{s['text_zh']}\n\n"
+        for s in subs
+    )
+    _commit_final_output(
+        output_path, input_path, input_snapshot_fingerprint, srt_text, subs,
+    )
 
     print(f"{log_prefix}✅ {output_path} — 修正 {len(corrections)} 处")
     return output_path
+
+
+def select_review_inputs(zh_files, audio_dir, enable_human_review):
+    if not enable_human_review:
+        return list(zh_files)
+    active = discover_active_audio(audio_dir)
+    zh_by_base = {
+        os.path.basename(path).replace("_zh.srt", ""): path for path in zh_files
+    }
+    files = []
+    for base in sorted(active):
+        zh_path = zh_by_base.get(base)
+        if not zh_path:
+            raise FileNotFoundError(f"当前音频缺少 STEP3 产物：{base}_zh.srt")
+        input_dir = os.path.dirname(zh_path)
+        human_path = os.path.join(input_dir, f"{base}_human_reviewed.srt")
+        result_path = os.path.join(input_dir, f"{base}_human_review.json")
+        current_job = build_bundle_for_base(
+            base, Path(input_dir), Path(audio_dir),
+        )
+        validate_completed_review_outputs(
+            human_path,
+            result_path,
+            expected_bundle_id=current_job["bundle"]["bundle_id"],
+            expected_bundle_fingerprint=current_job["bundle"]["bundle_fingerprint"],
+            current_input_srt=zh_path,
+        )
+        files.append(human_path)
+    return files
 
 def main():
     reset_usage()
 
     pattern = os.path.join(INPUT_DIR, PATTERN)
-    files = sorted(glob.glob(pattern))
-    if not files:
+    zh_files = sorted(glob.glob(pattern))
+    if not zh_files:
         print(f"❌ 未找到 {pattern}")
+        sys.exit(1)
+
+    audio_dir = os.environ.get("AUDIO_DIR", "./audio")
+    try:
+        files = select_review_inputs(zh_files, audio_dir, ENABLE_HUMAN_REVIEW)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(f"❌ 人工复核产物不完整或已失效：{exc}")
+        print("   为避免静默丢弃人工修改，终审已停止。请重新运行人工复核步骤。")
         sys.exit(1)
 
     print("=" * 60)
@@ -235,12 +511,27 @@ def main():
 
     all_files = []
     for f in files:
-        base = os.path.basename(f).replace("_zh.srt", "")
+        base = os.path.basename(f)
+        if base.endswith("_human_reviewed.srt"):
+            base = base[:-len("_human_reviewed.srt")]
+        else:
+            base = base.replace("_zh.srt", "")
         output_path = os.path.join(OUTPUT_DIR, f"{base}_final.srt")
+        force = False
         if os.path.exists(output_path):
-            print(f"  ⏭ {base} 已存在，跳过")
-            continue
-        all_files.append({"path": f, "base": base, "output_path": output_path})
+            if final_cache_is_current(output_path, f):
+                print(f"  ⏭ {base} 的 final manifest 与当前输入匹配，跳过")
+                continue
+            manifest_exists = os.path.isfile(_final_manifest_path(output_path))
+            if not f.endswith("_human_reviewed.srt") and not manifest_exists:
+                print(f"  ⏭ {base} 为旧版无 manifest 缓存，人工复核关闭时保留")
+                continue
+            force = True
+        if force:
+            print(f"  ♻ {base} 的 final 来源与当前输入不匹配，将在终审成功后原子替换")
+        all_files.append({
+            "path": f, "base": base, "output_path": output_path, "force": force,
+        })
 
     if not all_files:
         print("  全部文件已处理完毕。")
@@ -251,15 +542,24 @@ def main():
         futures = {}
         for fd in all_files:
             log_prefix = f"[{fd['base']}] "
-            future = executor.submit(process_one_file, fd["path"], log_prefix)
+            future = executor.submit(
+                process_one_file, fd["path"], log_prefix, fd["force"],
+            )
             futures[future] = fd
 
+        failed = False
         for future in as_completed(futures):
             fd = futures[future]
             try:
-                future.result()
+                if future.result() is None:
+                    failed = True
             except Exception as e:
+                failed = True
                 print(f"[{fd['base']}] ❌ 异常: {e}")
+
+    if failed:
+        print("\n❌ 至少一个终审任务失败；保留已有 final，并停止后续步骤。")
+        sys.exit(1)
 
     print(f"\n🏁 全篇终审全部完成！")
     print()

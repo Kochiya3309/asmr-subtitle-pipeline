@@ -2,172 +2,141 @@
 
 [English](README.md) | 简体中文
 
-将日语 ASMR 音频转换为中日双语 SRT 字幕。流水线融合两个 Whisper 转写结果，通过兼容 OpenAI 的 LLM 审校日文、翻译为简体中文、进行终审与规则验证，并可生成纯中文 SRT。
+将日语 ASMR 音频生成中日双语 SRT 字幕。流水线在本地使用 `large-v3` 和 `large-v3-turbo` 转写音频，再通过 OpenAI 兼容 LLM 融合、审校和翻译文本，最终输出可直接加载到播放器的字幕。
 
-**V3.6.1** 支持 OpenAI 兼容 LLM API（默认仍为 DeepSeek）、可选 Tavily/Exa 搜索、无 CUDA 时的 CPU 回退，以及已修复的 `start_*.bat` 启动脚本。
+## 核心能力
 
-## 流水线
+- 本地双 ASR，并保留可复核候选证据；对可疑的低音量窗口执行定向救援。
+- 高精度隔离已知固定幻觉模板，同时保留原始证据。
+- 可选无时间轴日文台本，并支持一份总台本对应多个音频文件。
+- 可选本地浏览器复核，提供日文、罗马音、中文、相邻上下文、播放、时间编辑、拆分和合并。
+- 输入绑定的断点缓存，可识别音频、配置、证据和上游字幕变化。
+- 异常长字幕时间修复和最终规则验证。
 
-| 步骤 | 脚本 | 用途 |
-| --- | --- | --- |
-| STEP0 | `match_scripts.py` | 可选的台本匹配与拆分 |
-| STEP1 | `ensemble_transcribe.py` | Whisper large-v3 + large-v3-turbo 转写与融合 |
-| STEP2 | `review_japanese.py` | 日语字幕二审 |
-| STEP3 | `translate.py` | 翻译与逐段审校 |
-| STEP4 | `review_final.py` | 全文终审 |
-| STEP5 | `validate_final.py` | 规则验证 |
-| STEP6 | `strip_japanese.py` | 可选纯中文 SRT |
+## 隐私与数据流向
 
-台本模式和联网搜索均默认关闭。对于 NSFW 内容，除非明确需要，否则请保持搜索关闭。
+- 音频预处理和两个 Whisper 模型均在本地运行。音频文件不会上传给 LLM 或搜索服务商。
+- 转写文本、字幕文本以及启用台本时的台本文本会发送给所配置的 OpenAI 兼容 LLM，用于融合、审校或翻译。
+- 联网搜索默认关闭。启用后，生成的查询词会发送给所配置的 Tavily 或 Exa 服务商。
+- 可选人工复核服务器只监听 `127.0.0.1`。
 
-## 系统要求
-
-| 项目 | 最低要求 | 推荐 |
-| --- | --- | --- |
-| 系统 | Windows 10/11；macOS/Linux 需调整路径 | Windows 11 |
-| GPU | 8 GB 显存的 NVIDIA GPU | RTX 3060 或更高 |
-| 内存 | 16 GB | 32 GB |
-| 硬盘 | 10 GB 空闲空间（模型） | SSD |
-| Python | 3.10 或 3.11 | 3.10 |
-| 其他 | FFmpeg 已加入 `PATH`，且可访问所选 LLM API | 稳定宽带 |
-
-无 CUDA 时自动选择 CPU，通常比 GPU 慢 5–10 倍。首次运行会下载约 4.5 GB Whisper 模型。
+处理隐私或 NSFW 内容时，除非确实需要外部检索，否则应保持 `ENABLE_SEARCH=0`。启用的处理阶段仍会把必要文本发送给 LLM 服务商。
 
 ## 快速开始
 
-1. 创建并激活虚拟环境：
+第一次使用请优先阅读[纯新手使用指南](docs/getting-started.zh-CN.md)，其中包含安装、配置、首次运行、结果查看和常见报错的逐步说明。
+
+1. 安装 Python、FFmpeg 和 ffprobe。推荐使用 Python 3.10 或 3.11。
+2. 创建隔离环境并安装依赖：
 
 ```powershell
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-2. 将 `.env.example` 复制为 `.env`，填写 `OPENAI_API_KEY`。
-3. 将 `.mp3`、`.m4a`、`.wav`、`.flac`、`.ogg` 或 `.opus` 音频放入 `audio/`。
-4. 双击 `start.bat`，或执行：
+3. 打开 `.env` 并填写 `OPENAI_API_KEY`。使用默认 DeepSeek 接口以外的服务商时，还需设置 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。
+4. 将 `.mp3`、`.m4a`、`.wav`、`.flac`、`.ogg` 或 `.opus` 文件放入 `audio/`。
+5. 双击 `start.bat`，或运行：
 
 ```powershell
 venv\Scripts\python.exe run_all.py
 ```
 
-5. 在播放器中加载 `output/` 内的 `*_final.srt`。如需 `*_cn_only.srt`，请开启 STEP6。
+6. 在播放器中加载 `output/*_final.srt`。
 
-`start.bat` 会设置 `HF_ENDPOINT=https://hf-mirror.com`，有助于中国大陆网络环境下载模型。
+首次运行需要下载数 GB 的模型数据。`start.bat` 会设置 `HF_ENDPOINT=https://hf-mirror.com`，供需要 Hugging Face 镜像的网络使用。
 
-## 配置
+## 运行模式
 
-运行开关位于 `run_all.py` 顶部。`.env` 存放密钥且被 Git 忽略；系统环境变量优先于 `.env`。
+### 默认无台本模式
 
-### LLM API
+无需额外设置。默认配置会关闭台本辅助、浏览器复核、确定性时间轴和联网搜索，同时执行完整的双 ASR、审校、翻译、终审、规则验证和纯中文导出流程。
 
-使用 DeepSeek 时通常只需 `OPENAI_API_KEY`。使用其他 OpenAI 兼容服务时，填写对应地址和模型名：
+### 台本辅助模式
 
-```dotenv
-OPENAI_API_KEY=sk-你的LLM密钥
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o
-OPENAI_ENABLE_THINKING=0
-```
-
-`OPENAI_ENABLE_THINKING=1` 仅适用于支持 DeepSeek 非标准 `thinking` 参数的服务商。未设置 `OPENAI_API_KEY` 时，会回退使用 `DEEPSEEK_API_KEY`。
-
-### 可选联网搜索
-
-仅在需要搜索时填写以下 Key，并在 `run_all.py` 中将 `ENABLE_SEARCH = True`：
+将日文台本放入 `scripts/`，然后设置：
 
 ```dotenv
-TAVILY_API_KEY=tvly-你的tavily密钥（可选）
-EXA_API_KEY=你的exa密钥（可选）
+ENABLE_SCRIPT=1
+STEP0_MATCH_SCRIPTS=1
 ```
 
-两个 Key 同时存在时会并行查询并按 URL 去重；仅填一个也可用；都未填时搜索会提示并自动关闭。
+STEP0 支持同名匹配、模糊匹配，以及把一份总台本拆分给多个音频文件。台词、动作说明、心理描写、章节标题和装饰分隔符都会保留。当前版本只有在设置 `ENABLE_SCRIPT=1` 后才会检测台本。
 
-### 流水线开关
+交互运行会要求确认生成的映射。无人值守任务如需自动确认，请先阅读 [.env.example](.env.example) 中 `SCRIPT_AUTO_VERIFY` 的风险说明。
 
-```python
-ENABLE_SEARCH = False
-ENABLE_SCRIPT = False
-STEP0_MATCH_SCRIPTS = False
-STEP1_ENSEMBLE = True
-STEP2_REVIEW_JP = True
-STEP3_TRANSLATE = True
-STEP4_FINAL = True
-STEP5_VALIDATE = True
-STEP6_STRIP = True
+### 人工复核模式
+
+设置：
+
+```dotenv
+ENABLE_HUMAN_REVIEW=1
 ```
 
-其他主要控制项为 `MAX_WORKERS`、`REVIEW_JP_BATCH_SIZE`、`REVIEW_JP_OVERLAP`、`REVIEW_JP_FULL_REVIEW`、`REVIEW_JP_FULL_REVIEW_BATCH`、`TRANSLATE_BATCH_SIZE` 和 `TRANSLATE_REVIEW_BATCH_SIZE`。
+翻译完成后，流水线会为需要检查的片段打开本地浏览器页面。如果尚未提交审核，流水线会安全暂停；完成审核后再次运行，即可从缓存继续。
 
-## 输出与断点续跑
+## 一次运行会做什么
 
-| 文件 | 说明 |
+1. 预处理音频，并在本地运行 `large-v3` 和 `large-v3-turbo`。
+2. 记录候选证据，隔离符合条件的固定幻觉，并对可疑窗口执行有边界的救援转写。
+3. 由所配置的 LLM 融合日文转写、审校原文、翻译为简体中文并审校译文。
+4. 可选浏览器复核允许检查困难片段并修改文本或时间轴。
+5. 全篇终审、本地规则验证和可选纯中文导出生成最终结果。
+
+准确的内部阶段顺序、缓存契约和审计产物见[开发者文档](docs/developer-guide.zh-CN.md)。
+
+## 输出文件
+
+| 文件 | 用途 |
 | --- | --- |
-| `*_ensemble.srt` | Whisper 双模型融合后的日语字幕 |
-| `*_reviewed.srt` | 日语二审结果 |
-| `*_zh.srt` | 翻译并逐段审校后的双语字幕 |
-| `*_final.srt` | 最终双语字幕 |
-| `*_cn_only.srt` | 开启 STEP6 后生成的纯中文字幕 |
-| `pipeline.log` | 追加写入的流水线日志 |
+| `*_final.srt` | 最终中日双语字幕，播放时使用这个文件 |
+| `*_cn_only.srt` | 已启用 STEP6 导出的纯中文字幕 |
+| `*_human_reviewed.srt` | 可选人工复核检查点，之后仍会进入 LLM 终审 |
+| `pipeline.log` | 追加写入的运行日志，用于排查问题 |
 
-已存在输出的步骤会跳过。临时失败后，修正问题并使用同一命令重跑即可。若要让播放器自动加载纯中文字幕，可执行 `python rename_suffix.py _cn_only` 或 `start_rename_cn_only.bat`；覆盖已存在目标前会创建 `.bak.srt` 备份。
+中间 SRT、ASR 证据、时间轴报告、manifest 和复核记录会保留在 `output/` 中，用于恢复和诊断。编辑或删除前请先阅读[开发者文档](docs/developer-guide.zh-CN.md)。
 
-## 音频预处理
+## 系统要求
 
-`ENABLE_AUDIO_PREPROCESS = True` 会启用 16 kHz 单声道处理、80 Hz 高通滤波、保守的稳态降噪、RMS 归一化至 -20 dBFS 和峰值限制。缓存的 `*_preprocessed.wav` 支持断点续跑。可在 `run_all.py` 用 `INITIAL_PROMPT`、`HOTWORDS` 和 `VAD_*` 控制项适配作品术语与耳语识别。
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | 主要面向 Windows 10/11；macOS/Linux 需要调整路径 |
+| Python | 推荐 3.10 或 3.11；当前 Windows venv 也已在 3.14.5 实测通过 |
+| GPU | 可选但强烈推荐；测试基线为 8 GB 显存的 NVIDIA GPU |
+| CPU 回退 | CTranslate2 支持，但速度会明显下降 |
+| 内存 | 最低 16 GB，推荐 32 GB |
+| 磁盘 | 模型和中间音频约需 10 GB 可用空间 |
+| 其他 | `PATH` 中可用 FFmpeg 和 ffprobe；首次下载模型及调用所选 API 时需要网络 |
 
-## 可选台本模式
+本项目不依赖 PyTorch；GPU 检测使用 `ctranslate2.get_cuda_device_count()`。
 
-将日语台本放入 `scripts/`，再开启：
+## 已知限制
 
-```python
-ENABLE_SCRIPT = True
-STEP0_MATCH_SCRIPTS = True
-SCRIPT_DIR = "./scripts"
-```
+- 极弱轻语、吹气声、强背景音效、削波或含糊发音仍可能漏识别或误识别。
+- 两人声音重叠时，两个 Whisper 模型都可能把内容合并到同一条字幕。
+- 幻觉隔离只针对已知的高精度模板，无法证明其余每一句都是真实语音。
+- LLM 审校能改善上下文和翻译，但也可能引入新错误。困难音频或用于发布的字幕仍建议人工复核。
+- `ENABLE_DETERMINISTIC_TIMELINE` 仍属实验功能，默认关闭。
+- 台本不会自动启用：当前必须先设置 `ENABLE_SCRIPT=1`，流水线才会检查 `scripts/`。
 
-匹配器支持一对一同名台本和合并台本，可识别 UTF-8/BOM 与 Shift-JIS（`cp932`），并在需要时请求确认。台本模式使用 large-v3 时间轴与台本内容，除非检测到不匹配，否则跳过 Turbo；不匹配时回退至 V3+Turbo，记录到 `output/script_mismatch.json`，STEP2 仅审校这些文件。
+## 高级配置与开发
 
-## 性能参考
+- [.env.example](.env.example)：面向用户的环境配置及其默认值、依赖关系和安全说明。
+- [开发者文档](docs/developer-guide.zh-CN.md)：架构、阶段契约、缓存失效、审计产物和发布检查。
+- [CHANGELOG.md](CHANGELOG.md) / [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)：当前与历史版本变化。
 
-以下历史实测使用 RTX 4060（8 GB 显存）和 32 GB 内存，处理 3 个各约 1 小时、约 300 条字幕的 ASMR 音频，关闭联网搜索。服务商价格会变化；V3.6 起程序报告 token 而不再估算费用。
-
-| 阶段 | 耗时 | 历史 DeepSeek 费用 |
-| --- | --- | --- |
-| 双模型 Whisper 转写 | 约 30 分钟 | 0 元 |
-| LLM 融合 | 约 2 分钟 | 约 0.15–0.24 元 |
-| 日语审校 | 约 4 分钟 | 约 0.24–0.39 元 |
-| 翻译与审校 | 约 6 分钟 | 约 0.30–0.45 元 |
-| 全篇终审 | 约 2 分钟 | 约 0.09–0.15 元 |
-| 自动化验证 | 约 2 秒 | 0 元 |
-| 合计 | 约 44 分钟 | 约 0.78–1.23 元 |
-
-## 更新日志
-
-### V3.6.1
-
-将 4 个 `start_*.bat` 重写为 ASCII 与 CRLF 行尾；分离 Python 命令、参数和 `pause`，修复双击启动脚本立即失败的问题。
-
-### V3.6.0
-
-迁移至 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_ENABLE_THINKING` 和 `OPENAI_MAX_TOKENS`；保留旧 Key 回退；将用量报告由费用估算改为 token 统计。
-
-### V3.5.0
-
-将智谱搜索替换为 Tavily 与 Exa。修复空内容重试、低置信度标记、部分空译文、GPU 降级、输出路径、重命名备份、台本回退和非交互台本确认；新增首次 Ctrl+C 防护与 Hugging Face 镜像启动设置。
-
-### V3.4.1–V3.0
-
-新增 `.env` 加载、音频预处理与 VAD 控制、台本辅助转写、GPU/LLM 两阶段处理、并行处理、Function Calling 结构化输出、token 日志和纯中文字幕输出。
+不要提交 `.env`、音频、模型文件、生成字幕、日志或 `_cache/` 诊断产物。
 
 ## 致谢
 
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[DeepSeek](https://platform.deepseek.com)、[Tavily](https://tavily.com)、[Exa](https://exa.ai)、[FFmpeg](https://ffmpeg.org)、[librosa](https://librosa.org)、[noisereduce](https://github.com/timsainb/noisereduce)、[SciPy](https://scipy.org) 和 [soundfile](https://python-soundfile.readthedocs.io)。
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[DeepSeek](https://platform.deepseek.com)、[Tavily](https://tavily.com)、[Exa](https://exa.ai)、[FFmpeg](https://ffmpeg.org)、[librosa](https://librosa.org)、[noisereduce](https://github.com/timsainb/noisereduce)、[SciPy](https://scipy.org)、[soundfile](https://python-soundfile.readthedocs) 和 [pykakasi](https://github.com/miurahr/pykakasi)。
 
 ## AI 参与说明
 
-本项目 Python 脚本和文档初稿由 AI 根据人类设计要求生成：V2.0 及以前使用 `deepseek-v4-pro`，V3.0 至 V3.4.1 使用 `GLM-5.2`，V3.5 起使用 `deepseek-v4-pro-0813`。人类作者负责定义项目、选择架构与参数、测试输出质量，以及做出发布和许可证决策。
+Python 脚本与文档由人类和 AI 迭代协作完成。人类作者定义使用场景、架构、参数、验收标准、基于听辨的质量决策和发布策略；AI 系统协助实现、编写文档、审查和构建测试。
 
 ## 许可证
 
-采用 GNU General Public License v3.0 or later（`GPL-3.0-or-later`）。详见 [LICENSE](LICENSE)。Copyright (c) 2025–2026 Kochiya3309.
+GNU 通用公共许可证 v3.0 或更高版本（`GPL-3.0-or-later`）。详见 [LICENSE](LICENSE)。Copyright (c) 2025–2026 Kochiya3309。
