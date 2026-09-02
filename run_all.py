@@ -273,7 +273,7 @@ def load_script_mismatches():
 def main():
     print()
     print("=" * 60)
-    print("    ASMR 字幕全自动流水线 v3.6")
+    print("    ASMR 字幕全自动流水线 v4.0")
     print(f"    模型：{OPENAI_MODEL or 'deepseek-v4-pro'} + Whisper Ensemble")
     print("=" * 60)
     print()

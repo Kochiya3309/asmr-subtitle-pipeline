@@ -6,7 +6,9 @@ This file records user-visible and architectural changes. Dates and commit links
 
 The repository begins with the V3.3 source snapshot. V3.0–V3.2 have no separate commits or tags; their entries below are reconstructed from the version notes stored in that initial commit.
 
-## [Unreleased]
+## [4.0.0] - 2026-09-02
+
+Commit: [`379ff1f`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit/379ff1f)
 
 ### Added
 
@@ -88,7 +90,7 @@ Commit: [`3f923bb`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit
 - Moved script-mismatch Turbo recovery into a serial main-thread phase so GPU inference did not compete with parallel LLM fusion.
 - Converted input and output paths to absolute paths for launches outside the project directory.
 - Made token estimation more conservative for long requests.
-- Non-interactive script matching no longer blocked on `input()`; at this release it automatically accepted the generated mapping. The Unreleased version replaces that behavior with explicit `SCRIPT_AUTO_VERIFY` fail-closed control.
+- Non-interactive script matching no longer blocked on `input()`; at this release it automatically accepted the generated mapping. V4.0.0 replaces that behavior with explicit `SCRIPT_AUTO_VERIFY` fail-closed control.
 
 ### Fixed
 

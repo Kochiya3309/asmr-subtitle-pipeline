@@ -1,4 +1,4 @@
-# ASMR 字幕自动生成流水线 — 开发者文档（Unreleased）
+# ASMR 字幕自动生成流水线 — 开发者文档（V4.0.0）
 
 本文描述当前开发树的真实实现。面向使用者的安装与配置说明见 [README.zh-CN.md](../README.zh-CN.md)，英文主文档见 [README.md](../README.md)。
 
@@ -301,7 +301,7 @@ venv\Scripts\python.exe -m unittest discover -s _cache\tests -p 'test_*.py' -q
 
 ## 更新记录
 
-### Unreleased
+### V4.0.0
 
 - 引入双 ASR 结构化证据、固定幻觉隔离、定向救援和确定性时间轴。
 - 引入浏览器双语人工复核、罗马音提示和时间轴编辑。

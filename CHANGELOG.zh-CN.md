@@ -6,7 +6,9 @@
 
 仓库历史从 V3.3 源码快照开始。V3.0–V3.2 没有各自独立的提交或 tag；下列内容根据首次提交中保留的历史版本说明重建。
 
-## [Unreleased]
+## [4.0.0] - 2026-09-02
+
+提交：[`379ff1f`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit/379ff1f)
 
 ### 新增
 
@@ -88,7 +90,7 @@
 - 台本 mismatch 的 Turbo 补跑移到主线程串行阶段，避免 GPU 推理与并行 LLM 融合争用。
 - 输入输出目录转为绝对路径，支持从项目外目录启动。
 - 长请求的 token 估算改得更保守。
-- 非交互台本匹配不再阻塞于 `input()`；该版本会自动接受当时生成的映射。Unreleased 版本已把它改为通过 `SCRIPT_AUTO_VERIFY` 显式控制的 fail-closed 行为。
+- 非交互台本匹配不再阻塞于 `input()`；该版本会自动接受当时生成的映射。V4.0.0 已把它改为通过 `SCRIPT_AUTO_VERIFY` 显式控制的 fail-closed 行为。
 
 ### 修复
 
