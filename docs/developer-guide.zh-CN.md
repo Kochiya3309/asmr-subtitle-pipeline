@@ -1,4 +1,6 @@
-# ASMR 字幕自动生成流水线 — 开发者文档（V4.0.0）
+# ASMR 字幕自动生成流水线 — 开发者文档（V4.0.1）
+
+[English](developer-guide.md) | 简体中文
 
 本文描述当前开发树的真实实现。面向使用者的安装与配置说明见 [README.zh-CN.md](../README.zh-CN.md)，英文主文档见 [README.md](../README.md)。
 
@@ -300,6 +302,11 @@ venv\Scripts\python.exe -m unittest discover -s _cache\tests -p 'test_*.py' -q
 - 未经明确要求不创建提交、不推送。
 
 ## 更新记录
+
+### V4.0.1
+
+- 新增英文新手指南和英文开发者指南，并提供双向语言导航。
+- 更新 README 文档链接，加入指向 GitHub Releases 的动态 Git tag 版本徽章。
 
 ### V4.0.0
 

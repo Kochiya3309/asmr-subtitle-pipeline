@@ -6,6 +6,17 @@ This file records user-visible and architectural changes. Dates and commit links
 
 The repository begins with the V3.3 source snapshot. V3.0–V3.2 have no separate commits or tags; their entries below are reconstructed from the version notes stored in that initial commit.
 
+## [4.0.1] - 2026-09-08
+
+### Added
+
+- English beginner and developer guides, with direct language switching between each English document and its Simplified Chinese counterpart.
+- A prominent version badge in both READMEs that follows the latest semantic-version Git tag and links to GitHub Releases.
+
+### Changed
+
+- Updated the English README to link to the English beginner and developer guides while keeping the Chinese README linked to the Chinese guides.
+
 ## [4.0.0] - 2026-09-02
 
 Commit: [`379ff1f`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit/379ff1f)

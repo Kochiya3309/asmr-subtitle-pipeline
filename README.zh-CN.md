@@ -2,6 +2,8 @@
 
 [English](README.md) | 简体中文
 
+[![版本](https://img.shields.io/github/v/tag/Kochiya3309/asmr-subtitle-pipeline?label=version&sort=semver&style=for-the-badge&color=blue)](https://github.com/Kochiya3309/asmr-subtitle-pipeline/releases)
+
 将日语 ASMR 音频生成中日双语 SRT 字幕。流水线在本地使用 `large-v3` 和 `large-v3-turbo` 转写音频，再通过 OpenAI 兼容 LLM 融合、审校和翻译文本，最终输出可直接加载到播放器的字幕。
 
 ## 核心能力

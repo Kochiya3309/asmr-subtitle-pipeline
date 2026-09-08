@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+[![Version](https://img.shields.io/github/v/tag/Kochiya3309/asmr-subtitle-pipeline?label=version&sort=semver&style=for-the-badge&color=blue)](https://github.com/Kochiya3309/asmr-subtitle-pipeline/releases)
+
 Generate Japanese–Simplified Chinese SRT subtitles from Japanese ASMR audio. The pipeline transcribes audio locally with `large-v3` and `large-v3-turbo`, uses an OpenAI-compatible LLM to fuse, review, and translate the text, and produces subtitles ready for a media player.
 
 ## Highlights
@@ -24,7 +26,7 @@ Keep `ENABLE_SEARCH=0` for private or NSFW material unless external lookup is ne
 
 ## Quick start
 
-For a click-by-click first-run guide, see the [Beginner guide (Simplified Chinese)](docs/getting-started.zh-CN.md).
+For a click-by-click first-run guide, see the [Beginner's guide](docs/getting-started.md).
 
 1. Install Python, FFmpeg, and ffprobe. Python 3.10 or 3.11 is recommended.
 2. Create an isolated environment and install the dependencies:
@@ -85,7 +87,7 @@ After translation, the pipeline opens a local browser page for flagged segments.
 4. Optional browser review lets you inspect difficult segments and edit their text or timing.
 5. A full-document review, local rule validation, and optional Chinese-only export produce the deliverables.
 
-The exact internal stage order, cache contracts, and audit artifacts are documented in [Developer guide (Simplified Chinese)](docs/developer-guide.zh-CN.md).
+The exact internal stage order, cache contracts, and audit artifacts are documented in the [developer guide](docs/developer-guide.md).
 
 ## Output files
 
@@ -124,7 +126,7 @@ The project does not depend on PyTorch. GPU detection uses `ctranslate2.get_cuda
 ## Advanced configuration and development
 
 - [.env.example](.env.example): documented user-facing settings with defaults, dependencies, and safety notes.
-- [Developer guide (Simplified Chinese)](docs/developer-guide.zh-CN.md): architecture, stage contracts, cache invalidation, audit artifacts, and release checks.
+- [Developer guide](docs/developer-guide.md): architecture, stage contracts, cache invalidation, audit artifacts, and release checks.
 - [CHANGELOG.md](CHANGELOG.md) / [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md): current and historical changes.
 
 Do not commit `.env`, audio, model files, generated subtitles, logs, or `_cache/` diagnostics.
