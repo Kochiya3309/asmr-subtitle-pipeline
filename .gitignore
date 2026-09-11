@@ -3,10 +3,12 @@ venv/
 
 # 音频和输出
 audio/*
+video/*
 output/*
 
 # 例外：保留目录结构
 !audio/.gitkeep
+!video/.gitkeep
 !output/.gitkeep
 
 # Python 缓存

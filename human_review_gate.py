@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+
+from output_layout import output_file, prepare_output
 import argparse
 import os
 from pathlib import Path
@@ -28,7 +30,7 @@ def _review_port_env() -> int:
 def discover_review_bases(output_dir: Path, audio_dir: Path) -> list[str]:
     active = discover_active_audio(audio_dir)
     for base in active:
-        expected = output_dir / f"{base}_zh.srt"
+        expected = Path(output_file(output_dir, f"{base}_zh.srt"))
         if not expected.is_file():
             raise FileNotFoundError(f"当前音频缺少 STEP3 产物：{expected}")
     return sorted(active)
@@ -97,6 +99,7 @@ def main() -> int:
         parser.error("--port must be between 0 and 65535")
     output_dir = args.output_dir.resolve()
     audio_dir = args.audio_dir.resolve()
+    prepare_output(output_dir)
     bases = discover_review_bases(output_dir, audio_dir)
     if not bases:
         raise FileNotFoundError(f"未找到 {output_dir / '*_zh.srt'}")

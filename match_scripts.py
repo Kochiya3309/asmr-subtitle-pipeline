@@ -8,13 +8,15 @@
   阶段3：写入映射文件
   阶段4：人工验证（交互式阻塞）
 """
+from output_layout import output_file, prepare_output
+from pipeline_inputs import discover_active_audio
 import os
 import sys
 import re
 import json
 from common import get_llm_client, call_deepseek, read_text_file
 from script_mapping_state import (
-    validate_mapping_verification, write_mapping_verification,
+    validate_mapping_verification, write_mapping_verification, resolve_mapping_path,
 )
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,13 +30,12 @@ def _project_path(value):
 AUDIO_DIR  = _project_path(os.environ.get("AUDIO_DIR", "./audio"))
 SCRIPT_DIR = _project_path(os.environ.get("SCRIPT_DIR", "./scripts"))
 OUTPUT_DIR = _project_path(os.environ.get("OUTPUT_DIR", "./output"))
-SPLIT_DIR  = os.path.join(OUTPUT_DIR, "scripts_split")
-MAPPING_FILE = os.path.join(OUTPUT_DIR, "script_mapping.json")
-VERIFIED_FILE = os.path.join(OUTPUT_DIR, "script_mapping.verified")
+SPLIT_DIR  = output_file(OUTPUT_DIR, "scripts_split")
+MAPPING_FILE = output_file(OUTPUT_DIR, "script_mapping.json")
+VERIFIED_FILE = output_file(OUTPUT_DIR, "script_mapping.verified")
 FORCE_RESPLIT = os.environ.get("SCRIPT_FORCE_RESPLIT", "0") == "1"
 FALLBACK_FULL = os.environ.get("SCRIPT_FALLBACK_FULL", "1") == "1"
 AUTO_VERIFY = os.environ.get("SCRIPT_AUTO_VERIFY", "0") == "1"
-AUDIO_EXTS = ['.mp3', '.m4a', '.wav', '.flac', '.ogg', '.opus']
 # ==================
 
 # ====== SPLIT_TOOL 定义（内部使用）======
@@ -122,15 +123,11 @@ def _match_parser(args):
 
 
 def collect_audio_files():
-    """收集音频文件，返回完整路径列表"""
-    files = []
-    if os.path.isfile(AUDIO_DIR):
-        return [AUDIO_DIR]
-    if os.path.isdir(AUDIO_DIR):
-        for f in sorted(os.listdir(AUDIO_DIR)):
-            if any(f.lower().endswith(ext) for ext in AUDIO_EXTS):
-                files.append(os.path.join(AUDIO_DIR, f))
-    return files
+    """Return the run-scoped audio sources, including prepared video audio."""
+    try:
+        return [str(path) for path in discover_active_audio(AUDIO_DIR).values()]
+    except FileNotFoundError:
+        return []
 
 
 def _check_duplicate_bases(audio_files):
@@ -378,7 +375,8 @@ def _verification_feedback():
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    prepare_output(OUTPUT_DIR)
+    os.makedirs(os.path.dirname(MAPPING_FILE), exist_ok=True)
     os.makedirs(SPLIT_DIR, exist_ok=True)
 
     audio_files = collect_audio_files()
@@ -437,7 +435,7 @@ def main():
                 # 检查1：台本文件在验证后被修改
                 if not need_redo:
                     for info in old_mapping.values():
-                        sp = info.get("script_path")
+                        sp = resolve_mapping_path(info.get("script_path"), PROJECT_DIR)
                         if sp and os.path.exists(sp) and os.path.getmtime(sp) > verified_mtime:
                             need_redo = True
                             reason = f"台本文件在验证后被修改：{os.path.basename(sp)}"

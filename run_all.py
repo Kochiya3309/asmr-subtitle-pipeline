@@ -4,9 +4,14 @@ import os
 import sys
 import json
 import subprocess
+from output_layout import output_file, prepare_output
+from pipeline_inputs import discover_active_audio
+from video_inputs import prepare_video_inputs
 
 
 PIPELINE_PAUSE_EXIT_CODE = 75
+# run_step 返回值：阶段失败但调用方允许继续（当前用于 STEP5 不阻断 STEP6）。
+RUN_STEP_FAILED_ALLOWED = "failed_continue"
 
 
 def _bool_env(name, default):
@@ -38,7 +43,6 @@ def _port_env(name, default):
 
 # 设置日志文件路径（必须在 import common 之前）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-os.environ.setdefault("LOG_FILE", os.path.join(_SCRIPT_DIR, "output", "pipeline.log"))
 
 # 加载 .env 文件（不依赖 python-dotenv，避免引入新依赖）
 _env_file = os.path.join(_SCRIPT_DIR, ".env")
@@ -49,6 +53,14 @@ if os.path.exists(_env_file):
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+# Relocate before common opens the log (Windows cannot move an open log).
+_output_root = os.path.abspath(os.environ.get("OUTPUT_DIR", os.path.join(_SCRIPT_DIR, "output")))
+if __name__ == "__main__":
+    prepare_output(_output_root)
+_legacy_log = os.path.join(_output_root, "pipeline.log")
+if not os.environ.get("LOG_FILE") or os.path.abspath(os.environ["LOG_FILE"]) == _legacy_log:
+    os.environ["LOG_FILE"] = output_file(_output_root, "pipeline.log")
 
 print("正在加载依赖库，请稍候（首次启动可能稍慢）...", flush=True)
 import common  # 触发日志初始化
@@ -69,9 +81,11 @@ EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 # 修复：改为绝对路径。相对路径依赖 cwd，用户从其他目录直接运行脚本时
 # 会静默写错位置（subprocess 虽设置了 cwd，但直接运行单个脚本时无保护）。
 AUDIO_DIR = os.path.abspath(os.environ.get("AUDIO_DIR", os.path.join(_SCRIPT_DIR, "audio")))
+VIDEO_DIR = os.path.abspath(os.environ.get("VIDEO_DIR", os.path.join(_SCRIPT_DIR, "video")))
 OUTPUT_DIR = os.path.abspath(os.environ.get("OUTPUT_DIR", os.path.join(_SCRIPT_DIR, "output")))
 
 ENABLE_SEARCH = _bool_env("ENABLE_SEARCH", False)
+ENABLE_VIDEO_PREP = _bool_env("ENABLE_VIDEO_PREP", False)
 
 MAX_WORKERS = 10              # LLM API 并发数
 
@@ -121,6 +135,9 @@ STEP35_HUMAN_REVIEW = (
 STEP4_FINAL = _bool_env("STEP4_FINAL", True)
 STEP5_VALIDATE = _bool_env("STEP5_VALIDATE", True)
 STEP6_STRIP = _bool_env("STEP6_STRIP", True)
+# 导出副本步骤：STEP7 依赖 STEP4 终稿，STEP8 依赖 STEP6 纯中文字幕。
+STEP7_EXPORT_FINAL = STEP4_FINAL and _bool_env("STEP7_EXPORT_FINAL", True)
+STEP8_EXPORT_CN_ONLY = STEP6_STRIP and _bool_env("STEP8_EXPORT_CN_ONLY", True)
 
 # 日语二审参数
 REVIEW_JP_BATCH_SIZE = 30          # 逐批审校每批条数
@@ -151,8 +168,10 @@ def get_env():
     env["TAVILY_API_KEY"] = TAVILY_API_KEY
     env["EXA_API_KEY"] = EXA_API_KEY
     env["AUDIO_DIR"] = AUDIO_DIR
+    env["VIDEO_DIR"] = VIDEO_DIR
     env["OUTPUT_DIR"] = OUTPUT_DIR
     env["ENABLE_SEARCH"] = "1" if ENABLE_SEARCH else "0"
+    env["ENABLE_VIDEO_PREP"] = "1" if ENABLE_VIDEO_PREP else "0"
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["LOG_FILE"] = os.environ.get("LOG_FILE", "")
@@ -189,7 +208,8 @@ def get_env():
     return env
 
 
-def run_step(step_num, total_steps, step_name, script_name, env, *, timeout=None):
+def run_step(step_num, total_steps, step_name, script_name, env, *, timeout=None,
+             allow_failure=False):
     print()
     print("=" * 60)
     print(f"  [{step_num}/{total_steps}] {step_name}")
@@ -213,6 +233,12 @@ def run_step(step_num, total_steps, step_name, script_name, env, *, timeout=None
         print()
         return False
     if result.returncode != 0:
+        if allow_failure:
+            print()
+            print(f"*** 警告：{step_name} 未通过（退出码 {result.returncode}），"
+                  "按配置继续后续步骤 ***")
+            print()
+            return RUN_STEP_FAILED_ALLOWED
         print()
         print(f"*** 错误：{step_name} 失败！ ***")
         sys.exit(1)
@@ -255,7 +281,7 @@ def run_optional_script_units_shadow(env):
 
 def load_script_mismatches():
     """读取本轮 STEP1 产出的 mismatch 列表；缺失或损坏时失败关闭。"""
-    mismatch_file = os.path.join(OUTPUT_DIR, "script_mismatch.json")
+    mismatch_file = output_file(OUTPUT_DIR, "script_mismatch.json")
     if not os.path.exists(mismatch_file):
         print("    警告：本轮未生成 script_mismatch.json，将执行 STEP2")
         return None
@@ -278,10 +304,38 @@ def main():
     print("=" * 60)
     print()
     print(f"    音频目录：{AUDIO_DIR}")
+    if ENABLE_VIDEO_PREP:
+        print(f"    视频目录：{VIDEO_DIR}")
     print(f"    输出目录：{OUTPUT_DIR}")
     print(f"    自主搜索：{'开启' if ENABLE_SEARCH else '关闭'}")
 
+    # A parent shell may have retained values from an earlier invocation.  This
+    # run owns the active-source snapshot and must rebuild it from disk.
+    os.environ.pop("ACTIVE_AUDIO_PATHS", None)
+    os.environ.pop("ACTIVE_AUDIO_BASES", None)
+    try:
+        active_audio = discover_active_audio(AUDIO_DIR)
+    except FileNotFoundError:
+        # Video-only runs are valid when the optional preparation stage is on.
+        if not ENABLE_VIDEO_PREP:
+            raise
+        active_audio = {}
+    if ENABLE_VIDEO_PREP:
+        print("\n  [输入准备] 检查视频并提取第一音轨（如有）")
+        video_audio = prepare_video_inputs(VIDEO_DIR, OUTPUT_DIR)
+        overlap = sorted(set(active_audio) & set(video_audio))
+        if overlap:
+            raise ValueError(
+                "video/audio task name conflict; rename one source: " + ", ".join(overlap)
+            )
+        active_audio.update(video_audio)
+    if not active_audio:
+        raise FileNotFoundError("no supported audio or video input was found")
     env = get_env()
+    env["ACTIVE_AUDIO_BASES"] = json.dumps(sorted(active_audio), ensure_ascii=False)
+    env["ACTIVE_AUDIO_PATHS"] = json.dumps(
+        {base: str(path) for base, path in sorted(active_audio.items())}, ensure_ascii=False,
+    )
 
     all_steps = [
         (STEP0_MATCH_SCRIPTS, "台本匹配与拆分",              "match_scripts.py"),
@@ -297,6 +351,8 @@ def main():
         (STEP4_FINAL,      "全篇终审（宏观+微观一致性检查）", "review_final.py"),
         (STEP5_VALIDATE,   "自动化验证（规则扫描残留问题）",  "validate_final.py"),
         (STEP6_STRIP,      "去除日文（仅保留中文）",        "strip_japanese.py"),
+        (STEP7_EXPORT_FINAL, "导出双语终稿副本（_transfer/final）", "export_final_srt.py"),
+        (STEP8_EXPORT_CN_ONLY, "导出纯中文字幕副本（_transfer/cn_only）", "export_cn_only_srt.py"),
     ]
 
     # 分两阶段：必须先跑 STEP0+STEP1，再读取本轮 mismatch 决定是否跑 STEP2。
@@ -304,11 +360,20 @@ def main():
     mid_step = all_steps[2]  # STEP2
     post_steps = [(name, script) for flag, name, script in all_steps[3:] if flag]
 
+    # 台本模式的 STEP2 要等 STEP1 写出本轮 mismatch 才能确定是否跳过。
+    # 前置阶段先显示诚实的总步数范围，避免输出没有信息量的 "?"。
+    total_without_step2 = len(pre_steps) + len(post_steps)
+    step2_is_conditional = STEP2_REVIEW_JP and ENABLE_SCRIPT
+    total_with_step2 = total_without_step2 + (1 if STEP2_REVIEW_JP else 0)
+    pre_step_total = (
+        f"{total_without_step2}–{total_with_step2}"
+        if step2_is_conditional else str(total_with_step2)
+    )
+
     executed = 0
     for name, script in pre_steps:
         executed += 1
-        # 此时本轮 STEP2 是否启用尚未知，先明确显示未知总步数。
-        if run_step(executed, "?", name, script, env) is False:
+        if run_step(executed, pre_step_total, name, script, env) is False:
             return
 
     # STEP1 已完成，现在读取它刚写出的 mismatch 文件。
@@ -331,39 +396,55 @@ def main():
         if run_step(executed, total, mid_step[1], mid_step[2], env) is False:
             return
 
+    step5_failed = False
     for name, script in post_steps:
         executed += 1
         kwargs = {}
         if script == "script_units_shadow_stage.py":
             kwargs["timeout"] = SCRIPT_UNITS_TOTAL_TIMEOUT_SECONDS
-        if run_step(executed, total, name, script, env, **kwargs) is False:
+        # STEP6_STRIP 开启时，STEP5 验证失败不再阻断纯中文导出：
+        # run_step 返回 RUN_STEP_FAILED_ALLOWED，流水线继续并在最后以失败退出。
+        allow_failure = script == "validate_final.py" and STEP6_STRIP
+        outcome = run_step(executed, total, name, script, env,
+                           allow_failure=allow_failure, **kwargs)
+        if outcome is False:
             return
+        if outcome == RUN_STEP_FAILED_ALLOWED:
+            step5_failed = True
 
     # It deliberately runs last so its API usage cannot starve production stages.
     run_optional_script_units_shadow(env)
+
+    if step5_failed:
+        print()
+        print("=" * 60)
+        print("  ⚠ STEP5 自动化验证未通过；已按配置继续生成纯中文字幕")
+        print("    请人工复核 final 字幕确认无误后再使用。")
+        print("=" * 60)
 
     print()
     print("=" * 60)
     print("                    全部完成！")
     print("=" * 60)
     print()
-    print(f"    输出文件在 {OUTPUT_DIR} 目录下：")
-    print(f"      *_ensemble.srt   -- Whisper 双模型融合字幕（日语）")
-    print(f"      *_reviewed.srt   -- 日语二审后字幕")
-    print(f"      *_zh.srt         -- translate + 审校双语字幕")
+    print(f"    输出按音频分类保存在 {OUTPUT_DIR}：")
+    print("      <音频名>/asr/      -- 预处理音频与双模型转写")
+    print("      <音频名>/evidence/ -- ASR 证据、隔离决策与救援记录")
+    print("      <音频名>/review/   -- 融合、日语二审、翻译及审核检查点")
     if ENABLE_HUMAN_REVIEW:
-        print(f"      *_human_reviewed.srt -- 人工复核后的双语字幕")
-        print(f"      *_human_review.json  -- 人工复核完成标记与审计记录")
-    print(f"      *_final.srt      -- 全篇终审终稿（用这个观看）")
-    print(f"      *_final_manifest.json -- 终审输入来源与缓存指纹")
-    print(f"      *_cn_only.srt    -- 纯中文字幕（需开启 STEP6）")
+        print("      <音频名>/review/human_reviewed.srt -- 人工复核后的双语字幕")
+    print("      <音频名>/final/<音频名>_final.srt   -- 全篇终审终稿（用这个观看）")
+    print("      <音频名>/final/<音频名>_cn_only.srt -- 纯中文字幕（需开启 STEP6）")
+    if STEP7_EXPORT_FINAL:
+        print("    _transfer/final/   -- 双语终稿音频同名副本（批量转移用）")
+    if STEP8_EXPORT_CN_ONLY:
+        print("    _transfer/cn_only/ -- 纯中文字幕音频同名副本（批量转移用）")
     if ENABLE_SCRIPT and (
         ENABLE_SCRIPT_UNITS_SHADOW or ENABLE_SCRIPT_REVIEW_FILTER
     ):
-        print(f"      *_script_units.json -- 台本结构分类")
-        print(f"      *_script_alignment.json -- 台本/ASR 时间窗对齐")
+        print("      <音频名>/script/ -- 台本结构分类与时间窗对齐")
     print()
-    print("    用播放器加载 *_final.srt 即可观看")
+    print("    用播放器加载 <音频名>/final/<音频名>_final.srt 即可观看")
     print()
     print(f"    音频目录：{AUDIO_DIR}")
     print(f"    输出目录：{OUTPUT_DIR}")
@@ -373,6 +454,8 @@ def main():
         input("按回车键退出...")
     else:
         print("非交互式终端，自动退出。")
+    if step5_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

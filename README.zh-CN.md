@@ -2,8 +2,6 @@
 
 [English](README.md) | 简体中文
 
-[![版本](https://img.shields.io/github/v/tag/Kochiya3309/asmr-subtitle-pipeline?label=version&sort=semver&style=for-the-badge&color=blue)](https://github.com/Kochiya3309/asmr-subtitle-pipeline/releases)
-
 将日语 ASMR 音频生成中日双语 SRT 字幕。流水线在本地使用 `large-v3` 和 `large-v3-turbo` 转写音频，再通过 OpenAI 兼容 LLM 融合、审校和翻译文本，最终输出可直接加载到播放器的字幕。
 
 ## 核心能力
@@ -40,21 +38,23 @@ Copy-Item .env.example .env
 
 3. 打开 `.env` 并填写 `OPENAI_API_KEY`。使用默认 DeepSeek 接口以外的服务商时，还需设置 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。
 4. 将 `.mp3`、`.m4a`、`.wav`、`.flac`、`.ogg` 或 `.opus` 文件放入 `audio/`。
+   若从视频开始，改将 `.mp4`、`.mkv`、`.mov`、`.webm` 或 `.avi` 放入 `video/`，并把
+   `ENABLE_VIDEO_PREP=1`；流水线会自动提取第一条音轨为受管理的 FLAC 输入。
 5. 双击 `start.bat`，或运行：
 
 ```powershell
 venv\Scripts\python.exe run_all.py
 ```
 
-6. 在播放器中加载 `output/*_final.srt`。
+6. 在播放器中加载 `output/<音频名>/final/<音频名>_final.srt`。
 
-首次运行需要下载数 GB 的模型数据。`start.bat` 会设置 `HF_ENDPOINT=https://hf-mirror.com`，供需要 Hugging Face 镜像的网络使用。
+首次运行需要下载数 GB 的模型数据。可用 Windows Terminal 时，`start.bat` 会在其中打开一个 PowerShell 标签页运行流水线；不可用时回退到自身的 CMD 窗口。它会设置 `HF_ENDPOINT=https://hf-mirror.com`，供需要 Hugging Face 镜像的网络使用。
 
 ## 运行模式
 
 ### 默认无台本模式
 
-无需额外设置。默认配置会关闭台本辅助、浏览器复核、确定性时间轴和联网搜索，同时执行完整的双 ASR、审校、翻译、终审、规则验证和纯中文导出流程。
+无需额外设置。默认配置会关闭台本辅助、浏览器复核、确定性时间轴和联网搜索，同时执行完整的双 ASR、审校、翻译、终审、规则验证、纯中文导出和副本导出流程。活动音频没有可用台本时会视为台本不匹配，并进入日文二审。
 
 ### 台本辅助模式
 
@@ -85,18 +85,26 @@ ENABLE_HUMAN_REVIEW=1
 2. 记录候选证据，隔离符合条件的固定幻觉，并对可疑窗口执行有边界的救援转写。
 3. 由所配置的 LLM 融合日文转写、审校原文、翻译为简体中文并审校译文。
 4. 可选浏览器复核允许检查困难片段并修改文本或时间轴。
-5. 全篇终审、本地规则验证和可选纯中文导出生成最终结果。
+5. 全篇终审、本地规则验证、纯中文导出，并在 `_transfer/` 中生成双语/纯中文的音频同名副本，便于批量转移。
 
 准确的内部阶段顺序、缓存契约和审计产物见[开发者文档](docs/developer-guide.zh-CN.md)。
 
+## 可选硬字幕视频交付
+
+硬字幕压制是独立于主字幕流水线的按需交付任务。已审校 SRT 的要求、试压流程、编码确认和不覆盖输出规则见[高级操作](docs/advanced-operations.zh-CN.md)。
+
 ## 输出文件
+
+以下路径相对于 `output/`。每条音频按 `asr/`、`evidence/`、`review/`、`final/` 分类；台本结构产物在需要时写入 `script/`。启动时会备份并迁移旧版平铺产物，原有有效缓存继续复用。
 
 | 文件 | 用途 |
 | --- | --- |
-| `*_final.srt` | 最终中日双语字幕，播放时使用这个文件 |
-| `*_cn_only.srt` | 已启用 STEP6 导出的纯中文字幕 |
-| `*_human_reviewed.srt` | 可选人工复核检查点，之后仍会进入 LLM 终审 |
-| `pipeline.log` | 追加写入的运行日志，用于排查问题 |
+| `<音频名>/final/<音频名>_final.srt` | 规范双语终稿；播放或压制硬字幕时使用它 |
+| `<音频名>/final/<音频名>_cn_only.srt` | 规范纯中文字幕；需启用 STEP6 |
+| `_transfer/final/<音频名>.srt` | 双语终稿音频同名副本（STEP7 导出，批量转移用） |
+| `_transfer/cn_only/<音频名>.srt` | 纯中文字幕音频同名副本（STEP8 导出，批量转移用） |
+| `<音频名>/review/human_reviewed.srt` | 可选人工复核检查点，之后仍会进入 LLM 终审 |
+| `_shared/pipeline.log` | 追加写入的运行日志，用于排查问题 |
 
 中间 SRT、ASR 证据、时间轴报告、manifest 和复核记录会保留在 `output/` 中，用于恢复和诊断。编辑或删除前请先阅读[开发者文档](docs/developer-guide.zh-CN.md)。
 
@@ -123,11 +131,13 @@ ENABLE_HUMAN_REVIEW=1
 - `ENABLE_DETERMINISTIC_TIMELINE` 仍属实验功能，默认关闭。
 - 台本不会自动启用：当前必须先设置 `ENABLE_SCRIPT=1`，流水线才会检查 `scripts/`。
 
-## 高级配置与开发
+## 文档导航
 
-- [.env.example](.env.example)：面向用户的环境配置及其默认值、依赖关系和安全说明。
-- [开发者文档](docs/developer-guide.zh-CN.md)：架构、阶段契约、缓存失效、审计产物和发布检查。
-- [CHANGELOG.md](CHANGELOG.md) / [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)：当前与历史版本变化。
+- [纯新手使用指南](docs/getting-started.zh-CN.md)：安装项目并完成首次运行。
+- [高级操作](docs/advanced-operations.zh-CN.md)：视频输入细节、硬字幕、迁移、导出和恢复任务。
+- [配置参考](docs/configuration.zh-CN.md)：受支持配置、默认值、依赖关系和隐私影响。
+- [开发者文档](docs/developer-guide.zh-CN.md)：阶段契约、缓存、架构和维护验证。
+- [更新日志](CHANGELOG.zh-CN.md)：已发布与未发布变更。
 
 不要提交 `.env`、音频、模型文件、生成字幕、日志或 `_cache/` 诊断产物。
 

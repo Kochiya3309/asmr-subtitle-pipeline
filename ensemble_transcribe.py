@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2025 Kochiya3309
+from output_layout import output_file, artifact_name, prepare_output
+from pipeline_inputs import discover_active_audio
 import os
 import sys
 import time
@@ -72,14 +74,15 @@ MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 ENABLE_SCRIPT = os.environ.get("ENABLE_SCRIPT", "0") == "1"
 ENABLE_SCRIPT_UNITS_SHADOW = os.environ.get("ENABLE_SCRIPT_UNITS_SHADOW", "0") == "1"
 SCRIPT_UNITS_API_TIMEOUT_SECONDS = 20.0
-SCRIPT_MAPPING_FILE = os.path.join(OUTPUT_DIR, "script_mapping.json")
-SCRIPT_VERIFIED_FILE = os.path.join(OUTPUT_DIR, "script_mapping.verified")
-MISMATCH_FILE = os.path.join(OUTPUT_DIR, "script_mismatch.json")
+SCRIPT_MAPPING_FILE = output_file(OUTPUT_DIR, "script_mapping.json")
+SCRIPT_VERIFIED_FILE = output_file(OUTPUT_DIR, "script_mapping.verified")
+MISMATCH_FILE = output_file(OUTPUT_DIR, "script_mismatch.json")
 # =================================
 # ====== 转写优化（V3.4 新增）======
 ENABLE_AUDIO_PREPROCESS = os.environ.get("ENABLE_AUDIO_PREPROCESS", "1") == "1"
 ENABLE_ASR_EVIDENCE = os.environ.get("ENABLE_ASR_EVIDENCE", "1") == "1"
 ENABLE_HALLUCINATION_FILTER = os.environ.get("ENABLE_HALLUCINATION_FILTER", "1") == "1"
+ENABLE_HUMAN_REVIEW = os.environ.get("ENABLE_HUMAN_REVIEW", "0") == "1"
 ENABLE_ASR_RESCUE = os.environ.get("ENABLE_ASR_RESCUE", "1") == "1"
 ENABLE_DETERMINISTIC_TIMELINE = os.environ.get("ENABLE_DETERMINISTIC_TIMELINE", "0") == "1"
 ENABLE_LONG_CUE_ALIGNMENT = os.environ.get("ENABLE_LONG_CUE_ALIGNMENT", "1") == "1"
@@ -113,7 +116,7 @@ SCRIPT_FUSION_PROMPT_VERSION = "2026-08-29.1"
 PREPROCESS_CACHE_CONTRACT_VERSION = "preprocessed-audio-manifest-v1"
 ASR_CACHE_CONTRACT_VERSION = "asr-srt-manifest-v1"
 LONG_CUE_ALIGNMENT_CONTRACT_VERSION = "long-cue-alignment-manifest-v1"
-LEGACY_FUSION_CONTRACT_VERSION = "legacy-llm-fusion-manifest-v1"
+LEGACY_FUSION_CONTRACT_VERSION = "legacy-llm-fusion-manifest-v2"
 LEGACY_FUSION_PROMPT_VERSION = "2026-09-02.1"
 
 def _detect_device():
@@ -206,8 +209,8 @@ def _audio_preprocess_config():
 
 def _preprocessed_paths(audio_path):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    output_path = os.path.join(OUTPUT_DIR, f"{base}_preprocessed.wav")
-    manifest_path = os.path.join(OUTPUT_DIR, f"{base}_preprocessed_manifest.json")
+    output_path = output_file(OUTPUT_DIR, f"{base}_preprocessed.wav")
+    manifest_path = output_file(OUTPUT_DIR, f"{base}_preprocessed_manifest.json")
     return output_path, manifest_path
 
 
@@ -253,7 +256,7 @@ def _ensure_preprocessed_audio(audio_path):
         if file_fingerprint(audio_path) != expected_source:
             raise ValueError("preprocess input changed during generation")
         staged_output = file_fingerprint(staged_path)
-        staged_output["name"] = os.path.basename(output_path)
+        staged_output["name"] = artifact_name(output_path)
         write_json_atomic(manifest_path, {
             "schema_version": 1,
             "artifact_type": "preprocessed_audio_manifest",
@@ -368,7 +371,7 @@ def _write_asr_cache_manifest(model_name, audio_path, actual_audio, output_srt,
 
 def _asr_evidence_path(audio_path):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    return os.path.join(OUTPUT_DIR, f"{base}_asr_candidates.json")
+    return output_file(OUTPUT_DIR, f"{base}_asr_candidates.json")
 
 
 def _backfill_legacy_evidence(audio_path, model_name, srt_path):
@@ -402,7 +405,11 @@ def _build_rescue_artifact(candidates, audio_duration):
         item for item in candidates if item.get("source_channel") == "main"
     ]
     main_windows = align_candidates(main_candidates)
-    main_decisions = classify_windows(main_candidates, main_windows)
+    main_decisions = classify_windows(
+        main_candidates,
+        main_windows,
+        quarantine_shared_templates=not ENABLE_HUMAN_REVIEW,
+    )
     return generate_rescue_windows(
         main_candidates,
         main_decisions,
@@ -432,7 +439,11 @@ def _write_shadow_decisions(audio_path, plan_rescue=True):
         artifacts = {
             f"{base}_asr_alignment.json": build_alignment_artifact(candidates, windows),
             f"{base}_asr_windows.json": build_windows_artifact(candidates, windows),
-            f"{base}_asr_decisions.json": classify_windows(candidates, windows),
+            f"{base}_asr_decisions.json": classify_windows(
+                candidates,
+                windows,
+                quarantine_shared_templates=not ENABLE_HUMAN_REVIEW,
+            ),
         }
         timeline_filename = f"{base}_fusion_timeline.json"
         artifacts[timeline_filename] = build_fusion_timeline(
@@ -451,7 +462,7 @@ def _write_shadow_decisions(audio_path, plan_rescue=True):
             payload["source"] = document["source"]
             payload["generation_id"] = generation_id
             payload["evidence_fingerprint"] = evidence_fingerprint
-            write_json_atomic(os.path.join(OUTPUT_DIR, filename), payload)
+            write_json_atomic(output_file(OUTPUT_DIR, filename), payload)
         manifest_name = f"{base}_asr_manifest.json"
         manifest = build_audit_manifest(
             generation_id,
@@ -459,7 +470,7 @@ def _write_shadow_decisions(audio_path, plan_rescue=True):
             {payload["artifact_type"]: filename for filename, payload in artifacts.items()},
         )
         manifest["source"] = document["source"]
-        write_json_atomic(os.path.join(OUTPUT_DIR, manifest_name), manifest)
+        write_json_atomic(output_file(OUTPUT_DIR, manifest_name), manifest)
         quarantine_count = len(artifacts[f"{base}_asr_decisions.json"]["quarantined_evidence_ids"])
         print(
             f"  🧭 ASR 影子审计：{len(windows)} 个对齐窗口，"
@@ -474,7 +485,7 @@ def _write_shadow_decisions(audio_path, plan_rescue=True):
 def _rescue_audio_path(audio_path):
     if ENABLE_AUDIO_PREPROCESS:
         base = os.path.splitext(os.path.basename(audio_path))[0]
-        preprocessed = os.path.join(OUTPUT_DIR, f"{base}_preprocessed.wav")
+        preprocessed = output_file(OUTPUT_DIR, f"{base}_preprocessed.wav")
         if os.path.exists(preprocessed):
             return preprocessed
     return audio_path
@@ -498,7 +509,7 @@ def _execute_rescue_if_enabled(audio_path, rescue_artifact):
 
 def _long_cue_alignment_path(audio_path):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    return os.path.join(OUTPUT_DIR, f"{base}_long_cue_alignment.json")
+    return output_file(OUTPUT_DIR, f"{base}_long_cue_alignment.json")
 
 
 def _long_cue_generation_fingerprint(max_duration_ms):
@@ -621,7 +632,11 @@ def _filter_fusion_inputs(audio_path, v3_text, turbo_text, log_prefix=""):
             item for item in document["candidates"]
             if item.get("source_channel") == "main"
         ]
-        decisions = classify_windows(main_candidates, align_candidates(main_candidates))
+        decisions = classify_windows(
+            main_candidates,
+            align_candidates(main_candidates),
+            quarantine_shared_templates=not ENABLE_HUMAN_REVIEW,
+        )
         filtered_v3, removed_v3 = filtered_srt_for_role(
             document, decisions, "v3", v3_text
         )
@@ -645,7 +660,11 @@ def _build_current_fusion_timeline(audio_path):
     if any(run.get("source_relation") != "matched" for run in document["runs"].values()):
         raise ValueError("存在来源关系未确认的 ASR run")
     candidates = document["candidates"]
-    decisions = classify_windows(candidates, align_candidates(candidates))
+    decisions = classify_windows(
+        candidates,
+        align_candidates(candidates),
+        quarantine_shared_templates=not ENABLE_HUMAN_REVIEW,
+    )
     return build_fusion_timeline(document, decisions)
 
 
@@ -765,14 +784,14 @@ def _write_script_fusion_manifest(
     audio_path, script_text, status, *, expected_inputs=None, output_path=None
 ):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    v3_srt = os.path.join(OUTPUT_DIR, f"{base}_v3.srt")
-    ensemble_srt = os.path.join(OUTPUT_DIR, f"{base}_ensemble.srt")
-    manifest_path = os.path.join(OUTPUT_DIR, f"{base}_script_fusion_manifest.json")
+    v3_srt = output_file(OUTPUT_DIR, f"{base}_v3.srt")
+    ensemble_srt = output_file(OUTPUT_DIR, f"{base}_ensemble.srt")
+    manifest_path = output_file(OUTPUT_DIR, f"{base}_script_fusion_manifest.json")
     current_inputs = _script_fusion_inputs(audio_path, v3_srt, script_text)
     if expected_inputs is not None and current_inputs != expected_inputs:
         raise ValueError("台本融合处理期间输入发生变化")
     output_fingerprint = file_fingerprint(output_path or ensemble_srt)
-    output_fingerprint["name"] = os.path.basename(ensemble_srt)
+    output_fingerprint["name"] = artifact_name(ensemble_srt)
     manifest = {
         "schema_version": 1,
         "artifact_type": "script_fusion_manifest",
@@ -786,12 +805,12 @@ def _write_script_fusion_manifest(
 
 def _write_pending_script_fusion_manifest(audio_path, script_text, expected_inputs):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    v3_srt = os.path.join(OUTPUT_DIR, f"{base}_v3.srt")
+    v3_srt = output_file(OUTPUT_DIR, f"{base}_v3.srt")
     current_inputs = _script_fusion_inputs(audio_path, v3_srt, script_text)
     if current_inputs != expected_inputs:
         raise ValueError("台本融合处理期间输入发生变化")
     write_json_atomic(
-        os.path.join(OUTPUT_DIR, f"{base}_script_fusion_manifest.json"),
+        output_file(OUTPUT_DIR, f"{base}_script_fusion_manifest.json"),
         {
             "schema_version": 1,
             "artifact_type": "script_fusion_manifest",
@@ -804,7 +823,7 @@ def _write_pending_script_fusion_manifest(audio_path, script_text, expected_inpu
 
 def _load_current_script_fusion(audio_path, v3_srt, ensemble_srt, script_text):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    manifest_path = os.path.join(OUTPUT_DIR, f"{base}_script_fusion_manifest.json")
+    manifest_path = output_file(OUTPUT_DIR, f"{base}_script_fusion_manifest.json")
     if not os.path.isfile(manifest_path):
         return None
     with open(manifest_path, "r", encoding="utf-8-sig") as handle:
@@ -848,7 +867,7 @@ def _write_asr_srt_atomic(output_srt, segments, input_is_current):
         if not input_is_current():
             raise ValueError("ASR input changed before commit")
         staged_output = file_fingerprint(staged_path)
-        staged_output["name"] = os.path.basename(output_srt)
+        staged_output["name"] = artifact_name(output_srt)
         os.replace(staged_path, output_srt)
         return staged_output
     except Exception:
@@ -996,8 +1015,8 @@ def transcribe_one_audio(audio_path, has_script=False):
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    v3_srt    = os.path.join(OUTPUT_DIR, f"{base}_v3.srt")
-    turbo_srt = os.path.join(OUTPUT_DIR, f"{base}_turbo.srt")
+    v3_srt    = output_file(OUTPUT_DIR, f"{base}_v3.srt")
+    turbo_srt = output_file(OUTPUT_DIR, f"{base}_turbo.srt")
 
     print(f"\n{'='*60}")
     print(f"📁 {audio_path}")
@@ -1019,10 +1038,10 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
     有台本时走 V3+台本模式；Turbo 仅作为旁路 ASR 证据；
     无台本或 mismatch 回退时走 V3+Turbo 模式（原 prompt）。"""
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    v3_srt    = os.path.join(OUTPUT_DIR, f"{base}_v3.srt")
-    turbo_srt = os.path.join(OUTPUT_DIR, f"{base}_turbo.srt")
-    ensemble_srt = os.path.join(OUTPUT_DIR, f"{base}_ensemble.srt")
-    fusion_manifest = os.path.join(OUTPUT_DIR, f"{base}_fusion_manifest.json")
+    v3_srt    = output_file(OUTPUT_DIR, f"{base}_v3.srt")
+    turbo_srt = output_file(OUTPUT_DIR, f"{base}_turbo.srt")
+    ensemble_srt = output_file(OUTPUT_DIR, f"{base}_ensemble.srt")
+    fusion_manifest = output_file(OUTPUT_DIR, f"{base}_fusion_manifest.json")
     use_script = bool(script_text) and not _is_retry
     script_inputs_snapshot = None
 
@@ -1053,7 +1072,7 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
             manifest = None
 
     if use_script and os.path.exists(ensemble_srt):
-        script_manifest = os.path.join(
+        script_manifest = output_file(
             OUTPUT_DIR, f"{base}_script_fusion_manifest.json"
         )
         if not os.path.exists(script_manifest):
@@ -1314,7 +1333,8 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
     else:
         fixed = extract_srt_from_response(result)
     if '-->' not in fixed:
-        raw = os.path.join(OUTPUT_DIR, f"{base}_raw.txt")
+        raw = output_file(OUTPUT_DIR, f"{base}_raw.txt")
+        os.makedirs(os.path.dirname(raw), exist_ok=True)
         with open(raw, "w", encoding="utf-8") as f:
             f.write(result)
         print(f"{log_prefix}⚠ 格式异常，原始响应 → {raw}")
@@ -1367,7 +1387,7 @@ def fuse_one_audio(audio_path, log_prefix="", script_text="", _is_retry=False):
         try:
             write_text_atomic(staged_srt, fixed + "\n")
             staged_output = file_fingerprint(staged_srt)
-            staged_output["name"] = os.path.basename(ensemble_srt)
+            staged_output["name"] = artifact_name(ensemble_srt)
             manifest_base = {
                 "schema_version": 1,
                 "artifact_type": "fusion_manifest",
@@ -1419,6 +1439,17 @@ def _write_merged_script_mismatches(active_bases):
     merged = ((previous & active) - _matched_script_files) | (_mismatch_files & active)
     write_json_atomic(MISMATCH_FILE, sorted(merged))
     return merged
+
+
+def _mark_missing_script_mismatches(audio_files, script_texts):
+    """Treat missing script text as a STEP2-review mismatch."""
+    missing = {
+        os.path.splitext(os.path.basename(path))[0]
+        for path in audio_files
+        if not script_texts.get(os.path.splitext(os.path.basename(path))[0])
+    }
+    _mismatch_files.update(missing)
+    return missing
 
 
 def check_script_mapping(*, force_script_units=False):
@@ -1536,7 +1567,7 @@ def run_script_units_shadow(audio_files, *, force=False):
     results = {}
     client = None
     for base, script_text in scripts.items():
-        output_path = os.path.join(OUTPUT_DIR, f"{base}_script_units.json")
+        output_path = output_file(OUTPUT_DIR, f"{base}_script_units.json")
         source_path = _script_exact_paths.get(base)
         try:
             cached = load_current_script_units(
@@ -1592,14 +1623,11 @@ def script_unit_source_is_current(base):
 
 
 def collect_audio_files():
-    files = []
-    if os.path.isfile(AUDIO_DIR):
-        return [AUDIO_DIR]
-    if os.path.isdir(AUDIO_DIR):
-        for f in sorted(os.listdir(AUDIO_DIR)):
-            if any(f.lower().endswith(ext) for ext in AUDIO_EXTS):
-                files.append(os.path.join(AUDIO_DIR, f))
-    return files
+    """Return run-scoped audio sources, including prepared video audio."""
+    try:
+        return [str(path) for path in discover_active_audio(AUDIO_DIR).values()]
+    except FileNotFoundError:
+        return []
 
 
 def _check_duplicate_bases(audio_files):
@@ -1616,6 +1644,7 @@ def _check_duplicate_bases(audio_files):
 
 
 def main():
+    prepare_output(OUTPUT_DIR)
     reset_usage()
 
     audio_files = collect_audio_files()
@@ -1636,6 +1665,10 @@ def main():
 
     # V3.2 新增：台本映射检查
     script_texts = check_script_mapping()
+    if ENABLE_SCRIPT:
+        # An empty script is not a successful script-assisted match. Keep it
+        # in the mismatch set so STEP2 performs the normal Japanese review.
+        _mark_missing_script_mismatches(audio_files, script_texts)
     if ENABLE_SCRIPT:
         with_open = sum(1 for v in script_texts.values() if v)
         print(f"📜 台本功能已开启：{with_open} / {len(audio_files)} 个音频有台本")
@@ -1732,10 +1765,10 @@ def main():
                 if base in _mismatch_files and script_texts.get(base):
                     script_inputs_snapshot = _script_fusion_inputs(
                         af,
-                        os.path.join(OUTPUT_DIR, f"{base}_v3.srt"),
+                        output_file(OUTPUT_DIR, f"{base}_v3.srt"),
                         script_texts[base],
                     )
-                turbo_srt = os.path.join(OUTPUT_DIR, f"{base}_turbo.srt")
+                turbo_srt = output_file(OUTPUT_DIR, f"{base}_turbo.srt")
                 if not os.path.exists(turbo_srt):
                     transcribe_with_model("large-v3-turbo", af, turbo_srt)
                 rescue_artifact = _write_shadow_decisions(af)
@@ -1767,7 +1800,7 @@ def main():
             if script_texts.get(base) and base not in _mismatch_files:
                 print(f"[{base}] 台本模式暂不启用长字幕旁路")
                 continue
-            ensemble_srt = os.path.join(OUTPUT_DIR, f"{base}_ensemble.srt")
+            ensemble_srt = output_file(OUTPUT_DIR, f"{base}_ensemble.srt")
             try:
                 report = _run_long_cue_alignment(af, ensemble_srt)
                 if report:
@@ -1802,7 +1835,7 @@ def main():
     print(f"{'='*60}")
     for af, out in results:
         print(f"  {'✅' if out else '❌'} {os.path.basename(af)}")
-    print(f"\n💡 下一步：output/*_ensemble.srt → review_japanese.py")
+    print(f"\n💡 下一步：<音频名>/review/ensemble.srt → review_japanese.py")
 
     print()
     print(get_usage_report())

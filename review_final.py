@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2025 Kochiya3309
+from output_layout import output_file, artifact_name, discover_outputs, prepare_output, output_root
 import re
 import os
 import sys
-import glob
 import json
 import shutil
 import time
@@ -179,7 +179,8 @@ def _final_generation_fingerprint():
 
 
 def _final_manifest_path(output_path):
-    return output_path[:-len("_final.srt")] + "_final_manifest.json"
+    name = artifact_name(output_path).removesuffix("_final.srt")
+    return output_file(output_root(output_path), f"{name}_final_manifest.json")
 
 
 def final_cache_is_current(output_path, input_path):
@@ -203,8 +204,8 @@ def final_cache_is_current(output_path, input_path):
         or manifest["artifact_type"] != "final_review_manifest"
         or manifest["status"] != "complete"
         or manifest["generation_fingerprint"] != _final_generation_fingerprint()
-        or manifest["input_srt_name"] != os.path.basename(input_path)
-        or manifest["output_srt_name"] != os.path.basename(output_path)
+        or manifest["input_srt_name"] != artifact_name(input_path)
+        or manifest["output_srt_name"] != artifact_name(output_path)
     ):
         return False
     try:
@@ -262,7 +263,7 @@ def _commit_final_output(
             os.makedirs(backup_dir, exist_ok=True)
             backup_suffix = time.time_ns()
             backup_path = os.path.join(
-                backup_dir, f"{os.path.basename(output_path)}.{backup_suffix}.bak",
+                backup_dir, f"{artifact_name(output_path)}.{backup_suffix}.bak",
             )
             shutil.copy2(output_path, backup_path)
             if os.path.exists(manifest_path):
@@ -278,9 +279,9 @@ def _commit_final_output(
             "artifact_type": "final_review_manifest",
             "status": "complete",
             "generation_fingerprint": _final_generation_fingerprint(),
-            "input_srt_name": os.path.basename(input_path),
+            "input_srt_name": artifact_name(input_path),
             "input_srt_fingerprint": input_snapshot_fingerprint,
-            "output_srt_name": os.path.basename(output_path),
+            "output_srt_name": artifact_name(output_path),
             "output_srt_fingerprint": staged_output_fingerprint,
         }
         write_json_atomic(manifest_path, manifest)
@@ -294,12 +295,12 @@ def _commit_final_output(
 
 
 def process_one_file(input_path, log_prefix="", force=False):
-    base = os.path.basename(input_path)
+    base = artifact_name(input_path)
     if base.endswith("_human_reviewed.srt"):
         base = base[:-len("_human_reviewed.srt")]
     else:
         base = base.replace("_zh.srt", "")
-    output_path = os.path.join(OUTPUT_DIR, f"{base}_final.srt")
+    output_path = output_file(OUTPUT_DIR, f"{base}_final.srt")
 
     if os.path.exists(output_path) and not force:
         print(f"{log_prefix}⏭ 已存在，跳过")
@@ -459,16 +460,16 @@ def select_review_inputs(zh_files, audio_dir, enable_human_review):
         return list(zh_files)
     active = discover_active_audio(audio_dir)
     zh_by_base = {
-        os.path.basename(path).replace("_zh.srt", ""): path for path in zh_files
+        artifact_name(path).replace("_zh.srt", ""): path for path in zh_files
     }
     files = []
     for base in sorted(active):
         zh_path = zh_by_base.get(base)
         if not zh_path:
             raise FileNotFoundError(f"当前音频缺少 STEP3 产物：{base}_zh.srt")
-        input_dir = os.path.dirname(zh_path)
-        human_path = os.path.join(input_dir, f"{base}_human_reviewed.srt")
-        result_path = os.path.join(input_dir, f"{base}_human_review.json")
+        input_dir = output_root(zh_path)
+        human_path = output_file(input_dir, f"{base}_human_reviewed.srt")
+        result_path = output_file(input_dir, f"{base}_human_review.json")
         current_job = build_bundle_for_base(
             base, Path(input_dir), Path(audio_dir),
         )
@@ -483,10 +484,11 @@ def select_review_inputs(zh_files, audio_dir, enable_human_review):
     return files
 
 def main():
+    prepare_output(INPUT_DIR)
     reset_usage()
 
-    pattern = os.path.join(INPUT_DIR, PATTERN)
-    zh_files = sorted(glob.glob(pattern))
+    pattern = os.path.join(INPUT_DIR, "*", "review", "zh.srt")
+    zh_files = discover_outputs(INPUT_DIR, PATTERN)
     if not zh_files:
         print(f"❌ 未找到 {pattern}")
         sys.exit(1)
@@ -511,19 +513,19 @@ def main():
 
     all_files = []
     for f in files:
-        base = os.path.basename(f)
+        base = artifact_name(f)
         if base.endswith("_human_reviewed.srt"):
             base = base[:-len("_human_reviewed.srt")]
         else:
             base = base.replace("_zh.srt", "")
-        output_path = os.path.join(OUTPUT_DIR, f"{base}_final.srt")
+        output_path = output_file(OUTPUT_DIR, f"{base}_final.srt")
         force = False
         if os.path.exists(output_path):
             if final_cache_is_current(output_path, f):
                 print(f"  ⏭ {base} 的 final manifest 与当前输入匹配，跳过")
                 continue
             manifest_exists = os.path.isfile(_final_manifest_path(output_path))
-            if not f.endswith("_human_reviewed.srt") and not manifest_exists:
+            if not artifact_name(f).endswith("_human_reviewed.srt") and not manifest_exists:
                 print(f"  ⏭ {base} 为旧版无 manifest 缓存，人工复核关闭时保留")
                 continue
             force = True

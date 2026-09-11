@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2025 Kochiya3309
+from output_layout import output_file, artifact_name, discover_outputs, prepare_output, output_root
 import os
 import sys
 import time
-import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
     get_llm_client, get_llm_config, call_deepseek, parse_srt,
@@ -23,8 +23,13 @@ ENABLE_SEARCH_IN_REVIEW = os.environ.get("ENABLE_SEARCH", "1") == "1"
 TRANSLATE_BATCH_SIZE = int(os.environ.get("TRANSLATE_BATCH_SIZE", "10"))
 TRANSLATE_REVIEW_BATCH_SIZE = int(os.environ.get("TRANSLATE_REVIEW_BATCH_SIZE", "20"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
-TRANSLATE_GENERATION_VERSION = "translate-review-2026-08-29.1"
+TRANSLATE_GENERATION_VERSION = "translate-review-2026-09-10.1"
 # ==================
+
+
+def _single_line_subtitle_text(text):
+    """Keep the project's bilingual SRT representation to one line per language."""
+    return " ".join(str(text).split())
 
 
 def _translate_generation_fingerprint():
@@ -49,9 +54,9 @@ def select_translation_inputs(ensemble_files):
     files = []
     fallback_count = 0
     for ensemble_path in ensemble_files:
-        base = os.path.basename(ensemble_path).replace("_ensemble.srt", "")
-        reviewed = os.path.join(INPUT_DIR, f"{base}_reviewed.srt")
-        reviewed_manifest = os.path.join(INPUT_DIR, f"{base}_reviewed_manifest.json")
+        base = artifact_name(ensemble_path).replace("_ensemble.srt", "")
+        reviewed = output_file(output_root(ensemble_path), f"{base}_reviewed.srt")
+        reviewed_manifest = output_file(output_root(ensemble_path), f"{base}_reviewed_manifest.json")
         if artifact_cache_is_current(
             reviewed_manifest, "reviewed_srt_manifest",
             ensemble_path, reviewed, None,
@@ -193,11 +198,12 @@ def _review_batch(client, batch_subs, batch_trans, batch_start, batch_len, log_p
 #  主流程
 # ============================================================
 def main():
+    prepare_output(INPUT_DIR)
     reset_usage()
 
     # 以 *_ensemble.srt 为基础输入，若存在 *_reviewed.srt 则优先使用
-    ensemble_pattern = os.path.join(INPUT_DIR, "*_ensemble.srt")
-    ensemble_files = sorted(glob.glob(ensemble_pattern))
+    ensemble_pattern = os.path.join(INPUT_DIR, "*", "review", "ensemble.srt")
+    ensemble_files = discover_outputs(INPUT_DIR, "*_ensemble.srt")
     if not ensemble_files:
         print(f"❌ 未找到 {ensemble_pattern}")
         sys.exit(1)
@@ -219,9 +225,9 @@ def main():
     # ---- 读取所有文件 ----
     all_files_data = []
     for f in files:
-        base = os.path.basename(f).replace("_reviewed.srt", "").replace("_ensemble.srt", "")
-        output_path = os.path.join(OUTPUT_DIR, f"{base}_zh.srt")
-        manifest_path = os.path.join(OUTPUT_DIR, f"{base}_zh_manifest.json")
+        base = artifact_name(f).replace("_reviewed.srt", "").replace("_ensemble.srt", "")
+        output_path = output_file(OUTPUT_DIR, f"{base}_zh.srt")
+        manifest_path = output_file(OUTPUT_DIR, f"{base}_zh_manifest.json")
         if os.path.exists(output_path):
             if artifact_cache_is_current(
                 manifest_path, "translated_srt_manifest", f, output_path,
@@ -382,7 +388,7 @@ def main():
             f"{sub['index']}\n"
             f"{sub['start']} --> {sub['end']}\n"
             f"{sub['text']}\n"
-            f"{zh}\n\n"
+            f"{_single_line_subtitle_text(zh)}\n\n"
             for sub, zh in zip(fd["subs"], fd["revised"])
         )
         commit_text_artifact(

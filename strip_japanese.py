@@ -5,9 +5,9 @@
 依赖 common.py 的日志功能。
 """
 
+from output_layout import output_file, artifact_name, discover_outputs, prepare_output
 import os
 import sys
-import glob
 import re
 import common  # 触发日志初始化
 
@@ -60,6 +60,7 @@ def remove_japanese_from_srt(input_path, output_path):
         print(f"  ⚠ 未提取到任何中文条目")
         return False
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(new_blocks) + "\n")
 
@@ -67,11 +68,11 @@ def remove_japanese_from_srt(input_path, output_path):
 
 
 def main():
-    pattern = os.path.join(INPUT_DIR, PATTERN)
-    files = sorted(glob.glob(pattern))
+    prepare_output(INPUT_DIR)
+    files = discover_outputs(INPUT_DIR, PATTERN)
 
     if not files:
-        print(f"❌ 在 {INPUT_DIR}/ 中未找到 *_final.srt 文件")
+        print(f"❌ 在 {INPUT_DIR}/<音频名>/final/ 中未找到 <音频名>_final.srt 文件")
         sys.exit(1)
 
     print("=" * 60)
@@ -79,11 +80,12 @@ def main():
     print("=" * 60)
     print(f"📋 {len(files)} 个文件待处理\n")
 
+    failed_files = []
     for f in files:
-        base = os.path.basename(f).replace("_final.srt", "")
-        output_path = os.path.join(OUTPUT_DIR, f"{base}_cn_only.srt")
+        base = artifact_name(f).replace("_final.srt", "")
+        output_path = output_file(OUTPUT_DIR, f"{base}_cn_only.srt")
 
-        print(f"  📄 {os.path.basename(f)} ...", end=" ", flush=True)
+        print(f"  📄 {artifact_name(f)} ...", end=" ", flush=True)
 
         success = remove_japanese_from_srt(f, output_path)
         if success:
@@ -91,11 +93,15 @@ def main():
             with open(output_path, "r", encoding="utf-8") as out_f:
                 content = out_f.read().strip()
             count = len(re.findall(r'\n\n+', content)) + 1 if content else 0
-            print(f"✅ → {os.path.basename(output_path)}（{count} 条）")
+            print(f"✅ → {artifact_name(output_path)}（{count} 条）")
         else:
             print("❌ 失败")
+            failed_files.append(artifact_name(f))
 
-    print(f"\n🏁 完成！输出文件以 _cn_only.srt 结尾")
+    print(f"\n🏁 完成！输出文件：<音频名>/final/<音频名>_cn_only.srt")
+    if failed_files:
+        print(f"❌ {len(failed_files)} 个文件未能提取任何中文字幕：{', '.join(failed_files)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

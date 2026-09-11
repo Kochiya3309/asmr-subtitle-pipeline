@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from output_layout import artifact_name
+
 import hashlib
 import json
 import os
@@ -47,9 +49,9 @@ def artifact_cache_is_current(
                 generation_fingerprint is None
                 or manifest["generation_fingerprint"] == generation_fingerprint
             )
-            and manifest["input_name"] == os.path.basename(input_path)
+            and manifest["input_name"] == artifact_name(input_path)
             and manifest["input_sha256"] == file_sha256(input_path)
-            and manifest["output_name"] == os.path.basename(output_path)
+            and manifest["output_name"] == artifact_name(output_path)
             and manifest["output_sha256"] == file_sha256(output_path)
         )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
@@ -68,9 +70,9 @@ def write_artifact_manifest(
         "artifact_type": artifact_type,
         "status": "complete",
         "generation_fingerprint": generation_fingerprint,
-        "input_name": os.path.basename(input_path),
+        "input_name": artifact_name(input_path),
         "input_sha256": file_sha256(input_path),
-        "output_name": os.path.basename(output_path),
+        "output_name": artifact_name(output_path),
         "output_sha256": file_sha256(output_path),
     })
 
@@ -124,9 +126,9 @@ def commit_text_artifact(
             "artifact_type": artifact_type,
             "status": "complete",
             "generation_fingerprint": generation_fingerprint,
-            "input_name": os.path.basename(input_path),
+            "input_name": artifact_name(input_path),
             "input_sha256": expected_input_sha256,
-            "output_name": os.path.basename(output_path),
+            "output_name": artifact_name(output_path),
             "output_sha256": staged_sha256,
         })
         os.replace(staged_path, output_path)
@@ -148,5 +150,5 @@ def backup_stale_artifacts(output_path: str, manifest_path: str) -> None:
     for path in existing:
         shutil.copy2(
             path,
-            os.path.join(backup_dir, f"{os.path.basename(path)}.{suffix}.bak"),
+            os.path.join(backup_dir, f"{artifact_name(path)}.{suffix}.bak"),
         )

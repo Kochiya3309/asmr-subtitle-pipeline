@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+
+from output_layout import output_file, prepare_output
 import argparse
 import json
 import mimetypes
@@ -363,11 +365,11 @@ def _load_prior_review_draft(bundle: dict, result_path: Path) -> dict[str, dict]
 def build_bundle_for_base(base: str, output_dir: Path, audio_dir: Path):
     output_dir = output_dir.resolve()
     audio_path = _find_audio(audio_dir.resolve(), base)
-    zh_path = output_dir / f"{base}_zh.srt"
+    zh_path = Path(output_file(output_dir, f"{base}_zh.srt"))
     if not zh_path.is_file():
         raise FileNotFoundError(zh_path)
-    script_units_path = output_dir / f"{base}_script_units.json"
-    script_alignment_path = output_dir / f"{base}_script_alignment.json"
+    script_units_path = Path(output_file(output_dir, f"{base}_script_units.json"))
+    script_alignment_path = Path(output_file(output_dir, f"{base}_script_alignment.json"))
     use_script_filter = os.environ.get(
         "ENABLE_SCRIPT_REVIEW_FILTER", "0"
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -384,17 +386,17 @@ def build_bundle_for_base(base: str, output_dir: Path, audio_dir: Path):
     bundle = build_review_bundle(
         zh_path,
         audio_path,
-        ensemble_srt_path=output_dir / f"{base}_ensemble.srt",
-        reviewed_srt_path=output_dir / f"{base}_reviewed.srt",
-        candidates_path=output_dir / f"{base}_asr_candidates.json",
-        timeline_path=output_dir / f"{base}_fusion_timeline.json",
+        ensemble_srt_path=Path(output_file(output_dir, f"{base}_ensemble.srt")),
+        reviewed_srt_path=Path(output_file(output_dir, f"{base}_reviewed.srt")),
+        candidates_path=Path(output_file(output_dir, f"{base}_asr_candidates.json")),
+        timeline_path=Path(output_file(output_dir, f"{base}_fusion_timeline.json")),
         script_units_path=script_units_path if use_script_filter else None,
         script_alignment_path=script_alignment_path if use_script_filter else None,
-        long_cue_alignment_path=output_dir / f"{base}_long_cue_alignment.json",
+        long_cue_alignment_path=Path(output_file(output_dir, f"{base}_long_cue_alignment.json")),
         romanizer=_optional_romanizer(),
     )
     bundle.setdefault("audio", {})["duration_ms"] = _probe_audio_duration_ms(audio_path)
-    result_path = output_dir / f"{base}_human_review.json"
+    result_path = Path(output_file(output_dir, f"{base}_human_review.json"))
     prior_review = _load_prior_review_draft(bundle, result_path)
     if prior_review:
         bundle["prior_review"] = prior_review
@@ -405,7 +407,7 @@ def build_bundle_for_base(base: str, output_dir: Path, audio_dir: Path):
         "bundle": bundle,
         "audio_path": audio_path,
         "input_srt": zh_path,
-        "output_srt": output_dir / f"{base}_human_reviewed.srt",
+        "output_srt": Path(output_file(output_dir, f"{base}_human_reviewed.srt")),
         "result_json": result_path,
     }
 
@@ -425,6 +427,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     args = parser.parse_args()
+    prepare_output(args.output_dir)
     job = build_bundle_for_base(args.base, args.output_dir, args.audio_dir)
     bundle = job["bundle"]
     server = create_review_server(

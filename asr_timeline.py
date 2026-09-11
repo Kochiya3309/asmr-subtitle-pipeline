@@ -15,7 +15,7 @@ from asr_evidence import canonical_fingerprint, normalize_text
 
 SCHEMA_VERSION = 1
 CONTRACT_VERSION = "evidence-v1-shadow"
-FUSION_ALGORITHM_VERSION = "deterministic-fusion-v1"
+FUSION_ALGORITHM_VERSION = "deterministic-fusion-v2"
 _SELECTION_FIELDS = {"timeline_id", "evidence_ids", "text", "review_required", "note"}
 _FORBIDDEN_TIME_FIELDS = {"timecode", "start", "end"}
 

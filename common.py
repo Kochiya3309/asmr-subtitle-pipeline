@@ -8,6 +8,7 @@ import hashlib
 import builtins
 from openai import OpenAI
 from script_text_io import read_script_text_exact
+from output_layout import output_file, prepare_output
 
 # ======================================================================
 #  文件日志（通过 monkey-patch builtins.print 实现）
@@ -30,6 +31,12 @@ def _init_logging():
     global _log_fp
     log_file = os.environ.get("LOG_FILE")
     if log_file and _log_fp is None:
+        output_root = os.path.abspath(os.environ.get("OUTPUT_DIR", "./output"))
+        canonical_log = output_file(output_root, "pipeline.log")
+        if os.path.abspath(log_file) in {os.path.join(output_root, "pipeline.log"), canonical_log}:
+            prepare_output(output_root)
+            log_file = canonical_log
+            os.environ["LOG_FILE"] = log_file
         log_dir = os.path.dirname(os.path.abspath(log_file))
         os.makedirs(log_dir, exist_ok=True)
         _log_fp = open(log_file, "a", encoding="utf-8")

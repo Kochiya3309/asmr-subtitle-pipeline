@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from output_layout import artifact_name
+
 import hashlib
 import json
 import os
@@ -809,7 +811,7 @@ def build_review_bundle(
         "size_bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "audio_fingerprint": _file_fingerprint(source_audio),
-        "input_srt_name": bilingual_path.name,
+        "input_srt_name": artifact_name(bilingual_path),
         "input_srt_fingerprint": _file_fingerprint(bilingual_path),
     }
     identity_payload = {
@@ -1203,7 +1205,7 @@ def write_review_outputs(
         "source_input_srt_name": bundle["source"]["input_srt_name"],
         "source_input_srt_fingerprint": bundle["source"]["input_srt_fingerprint"],
         "timeline_fingerprint": bundle.get("timeline_fingerprint"),
-        "output_srt_name": output_path.name,
+        "output_srt_name": artifact_name(output_path),
         "output_srt_fingerprint": hashlib.sha256(srt_text.encode("utf-8")).hexdigest(),
     }
     existing = [path for path in (output_path, result_path) if path.exists()]
@@ -1253,11 +1255,11 @@ def validate_completed_review_outputs(
         and result["bundle_fingerprint"] != expected_bundle_fingerprint
     ):
         raise ValueError("completed human review bundle fingerprint mismatch")
-    if result["output_srt_name"] != output_path.name:
+    if result["output_srt_name"] != artifact_name(output_path):
         raise ValueError("completed human review output filename mismatch")
     if current_input_srt is not None:
         input_path = Path(current_input_srt)
-        if result["source_input_srt_name"] != input_path.name:
+        if result["source_input_srt_name"] != artifact_name(input_path):
             raise ValueError("completed human review input filename mismatch")
         if result["source_input_srt_fingerprint"] != _file_fingerprint(input_path):
             raise ValueError("completed human review input SRT fingerprint mismatch")

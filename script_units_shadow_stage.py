@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Optional post-pipeline entrypoint for publisher-script structure analysis."""
 
+from output_layout import output_file, prepare_output
 import json
 import hashlib
 import os
@@ -35,9 +36,9 @@ def run_script_alignment_shadow(
         base = os.path.splitext(os.path.basename(audio_path))[0]
         if base not in script_unit_results:
             continue
-        units_path = os.path.join(output_dir, f"{base}_script_units.json")
-        timeline_path = os.path.join(output_dir, f"{base}_fusion_timeline.json")
-        output_path = os.path.join(output_dir, f"{base}_script_alignment.json")
+        units_path = output_file(output_dir, f"{base}_script_units.json")
+        timeline_path = output_file(output_dir, f"{base}_fusion_timeline.json")
+        output_path = output_file(output_dir, f"{base}_script_alignment.json")
         if not os.path.isfile(timeline_path):
             if fail_fast:
                 raise FileNotFoundError(
@@ -81,6 +82,7 @@ def run_script_alignment_shadow(
 
 
 def main():
+    prepare_output(OUTPUT_DIR)
     review_filter_required = os.environ.get(
         "ENABLE_SCRIPT_REVIEW_FILTER", "0"
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -95,6 +97,9 @@ def main():
         audio_files, force=review_filter_required,
     )
     print(f"Script-units shadow: {len(results)} artifact(s) current")
+    if not results:
+        print("Script-units shadow: no non-empty scripts; skipped")
+        return
     if review_filter_required and len(results) != len(audio_files):
         raise RuntimeError("Script review filter requires units for every active audio")
     alignments = run_script_alignment_shadow(

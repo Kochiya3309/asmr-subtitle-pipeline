@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from output_layout import logical_path, resolve_relocated_script
+
 import hashlib
 import json
 import os
@@ -27,7 +29,7 @@ def _resolve_path(value, project_dir: Path) -> Path | None:
     if not value or not isinstance(value, (str, os.PathLike)):
         return None
     path = Path(value)
-    return path.resolve() if path.is_absolute() else (project_dir / path).resolve()
+    return resolve_relocated_script(path if path.is_absolute() else project_dir / path)
 
 
 def resolve_mapping_path(value, project_dir) -> Path | None:
@@ -43,7 +45,7 @@ def _small_file_identity(value, project_dir: Path):
     stat = path.stat()
     return {
         "path_fingerprint": hashlib.sha256(
-            os.path.normcase(str(path)).encode("utf-8")
+            os.path.normcase(str(logical_path(path))).encode("utf-8")
         ).hexdigest(),
         "size_bytes": stat.st_size,
         "sha256": _sha256(path),

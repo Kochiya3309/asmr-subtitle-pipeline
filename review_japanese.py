@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2025 Kochiya3309
+from output_layout import output_file, artifact_name, discover_outputs, prepare_output
 import os
 import sys
 import time
 import json
-import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (
     get_llm_client, get_llm_config, call_deepseek, parse_srt,
@@ -28,7 +28,7 @@ ENABLE_FULL_REVIEW = os.environ.get("REVIEW_JP_FULL_REVIEW", "1") == "1"
 FULL_REVIEW_BATCH = int(os.environ.get("REVIEW_JP_FULL_REVIEW_BATCH", "200"))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 # 台本模式下用于选择性审校（仅 mismatch 文件）
-MISMATCH_FILE = os.path.join(OUTPUT_DIR, "script_mismatch.json")
+MISMATCH_FILE = output_file(OUTPUT_DIR, "script_mismatch.json")
 REVIEW_JP_GENERATION_VERSION = "review-japanese-2026-08-29.1"
 # ==================
 
@@ -249,10 +249,11 @@ def _process_batch(client, batch, batch_start, batch_end, log_prefix):
 
 
 def main():
+    prepare_output(INPUT_DIR)
     reset_usage()
 
-    pattern = os.path.join(INPUT_DIR, PATTERN)
-    files = sorted(glob.glob(pattern))
+    pattern = os.path.join(INPUT_DIR, "*", "review", "ensemble.srt")
+    files = discover_outputs(INPUT_DIR, PATTERN)
     if not files:
         print(f"❌ 未找到匹配 {pattern} 的文件")
         sys.exit(1)
@@ -265,7 +266,7 @@ def main():
         except Exception:
             mismatch_list = set()
         if mismatch_list:
-            filtered = [f for f in files if os.path.basename(f).replace("_ensemble.srt", "") in mismatch_list]
+            filtered = [f for f in files if artifact_name(f).replace("_ensemble.srt", "") in mismatch_list]
             print(f"🔬 检测到 mismatch 列表（{len(mismatch_list)} 个），仅审校这些文件")
             files = filtered
             if not files:
@@ -288,9 +289,9 @@ def main():
     # ---- 读取所有文件 ----
     all_files_data = []
     for f in files:
-        base = os.path.basename(f).replace("_ensemble.srt", "")
-        output_path = os.path.join(OUTPUT_DIR, f"{base}_reviewed.srt")
-        manifest_path = os.path.join(OUTPUT_DIR, f"{base}_reviewed_manifest.json")
+        base = artifact_name(f).replace("_ensemble.srt", "")
+        output_path = output_file(OUTPUT_DIR, f"{base}_reviewed.srt")
+        manifest_path = output_file(OUTPUT_DIR, f"{base}_reviewed_manifest.json")
         if os.path.exists(output_path):
             if artifact_cache_is_current(
                 manifest_path, "reviewed_srt_manifest", f, output_path,

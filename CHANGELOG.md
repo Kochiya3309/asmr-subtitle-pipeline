@@ -6,7 +6,41 @@ This file records user-visible and architectural changes. Dates and commit links
 
 The repository begins with the V3.3 source snapshot. V3.0–V3.2 have no separate commits or tags; their entries below are reconstructed from the version notes stored in that initial commit.
 
+## [4.1.0] - 2026-09-11
+
+### Added
+
+- The pipeline now runs STEP7/STEP8 automatically: bilingual finals and Chinese-only subtitles are copied as `<audio>.srt` into `_transfer/final/` and `_transfer/cn_only/` for batch transfer. Each step has its own toggle (`STEP7_EXPORT_FINAL`, `STEP8_EXPORT_CN_ONLY`) and requires its upstream stage to be enabled.
+- Optional video input preparation (`ENABLE_VIDEO_PREP`) scans `video/`, extracts each source video's first audio stream to a content-bound FLAC input, and adds it to the same active-source snapshot as ordinary audio files.
+- Added `burn_subtitles.py` and `start_burn_subtitles.bat` for on-demand interactive hard-subtitle delivery. The launcher uses a Windows Terminal PowerShell tab when `wt.exe` is available and falls back to CMD. The helper accepts dragged video/SRT paths, shows the selected NVENC/CPU, HDR/SDR, font, audio, and output plan, and requires confirmation before encoding.
+
+### Fixed
+
+- Hard-subtitle total progress now retains the FFprobe-reported media duration. Normal FFmpeg informational messages no longer interrupt the progress line.
+- Hard-subtitle preflight now decodes captured FFmpeg and FFprobe output as UTF-8, avoiding a Windows GBK decoding failure before media inspection.
+- STEP0 script matching and STEP1 transcription now consume the run-scoped active-input snapshot, so a video-extracted FLAC can be matched and transcribed even when `audio/` is empty. The script-structure side path inherits the same STEP1 input set.
+- STEP3 now normalizes each translated Chinese cue to one physical line before writing `review/zh.srt`. This prevents a valid multi-line translation from being rejected later by STEP4's four-line bilingual-SRT contract.
+- When human review is disabled, shared known fixed hallucination templates such as "Thank you for watching" are quarantined even if both Whisper variants emit them in the same window.
+- `run_all.py` now scopes every formal downstream stage to the audio files active at the start of the run, preventing historical output directories from being translated, reviewed, validated, stripped, or exported again.
+- Missing or empty mapped scripts are recorded as mismatches, so affected audio receives STEP2 Japanese second-pass review instead of being skipped. Script-structure shadow analysis now skips normally when no non-empty script is available.
+- STEP6 now returns failure when Chinese text cannot be extracted for any active file, which blocks both transfer-export stages.
+- Final validation now accepts non-empty single-character Japanese cues, avoiding false failures for short utterances such as `あ`.
+
+### Changed
+
+- Hard-subtitle delivery now offers a Standard quality-oriented profile and an opt-in Fast profile. It renders FFmpeg's structured timing reports as total progress, elapsed time, and estimated remaining time.
+- Video input preparation now prints a compact Chinese progress summary instead of FFmpeg's verbose success output; FFmpeg diagnostics are retained for extraction failures.
+- Outputs are grouped by audio and stage (`asr`, `evidence`, `review`, `final`, and optional `script`), with shared files under `_shared`. Legacy flat outputs are backed up and migrated automatically; stable identities retain valid caches and completed human review.
+- The final bilingual subtitle is stored as `<audio>_final.srt` and the Chinese-only subtitle as `<audio>_cn_only.srt` inside each audio's `final/` folder. Export scripts copy audio-named `<audio>.srt` files into `_transfer/final/` and `_transfer/cn_only/` for batch transfer while retaining the canonical files; the former `rename_suffix.py` tool and its legacy export launchers were removed because those stages now run inside `run_all.py`.
+
+- Updated fusion cache contracts so prior fusion outputs are not reused after this hallucination-filter rule changes.
+- When `STEP6_STRIP` is enabled, a failed STEP5 rule validation no longer blocks the Chinese-only export: STEP6 still runs, and the pipeline reports the validation problem and exits with a failure status.
+- `start.bat` opens the pipeline in one Windows Terminal PowerShell tab when `wt.exe` is available, with the previous CMD launcher retained as a fallback.
+- Updated the English and Simplified Chinese README, beginner guide, and developer guide for the current output layout, transfer exports, launch behavior, active-audio scope, script-review fallback, and STEP6 failure boundary.
+
 ## [4.0.1] - 2026-09-08
+
+Commit: [`42535a6`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit/42535a6)
 
 ### Added
 
@@ -192,16 +226,17 @@ Historical reconstruction from the V3.3 snapshot; no standalone V3.1 commit or t
 
 ## [3.0.0]
 
-Historical reconstruction from the V3.3 snapshot; no standalone V3.0 commit or tag exists.
+Reconstructed from a file-by-file comparison of the V2.0 (2026-06-25) and V3.0 (2026-07-04) source archives plus the accompanying development record. No standalone V3.0 commit or tag exists, so no exact release date is claimed. The entries below cover only changes verified between those snapshots; earlier foundational work belongs to the pre-V3.0 development record and is not presented as new in this release.
 
 ### Added
 
-- Cross-file and cross-batch parallelism for Japanese review, translation review, and final review. STEP1 fusion joined this parallel model in V3.1.
+- Cross-file and cross-batch parallelism for Japanese review, translation and translation review, and final review; GPU transcription remained serial.
 - Central configuration in `run_all.py`, passed to child scripts through environment variables.
 - Append-only `output/pipeline.log` logging shared by every script.
 - A Whisper model cache that reused each loaded ASR model across audio files.
-- `strip_japanese.py` as an optional Chinese-only export stage.
+- Integrated the existing `strip_japanese.py` as the optional STEP6 Chinese-only export stage.
 - A generic `rename_suffix.py` tool replacing separate rename utilities.
+- `requirements.txt`, declaring the `faster-whisper` and `openai` dependencies.
 
 ### Changed
 
@@ -211,10 +246,35 @@ Historical reconstruction from the V3.3 snapshot; no standalone V3.0 commit or t
 - Generalized final-review context inference instead of assuming one work's setting.
 - Included web-search instructions in prompts only when search was enabled.
 - Returned an empty translation placeholder on failure instead of copying Japanese text into the Chinese field, allowing validation to surface the problem.
+- Treated recognition-failure and low-confidence markers as critical omission findings in validation; Chinese-only export now preserved multi-line translations.
 
 ### Fixed
 
 - Stopped caching search errors and corrected search-cache miss accounting when no provider key was configured.
+- Fixed SRT parsing that returned from inside its block loop, and accepted subtitle blocks without an index line.
+- Renumbered fused output before writing so a missing first index could not cause the remaining subtitles to be lost.
+
+## Pre-V3.0 (no recoverable release boundaries)
+
+The accompanying development record describes the following early capabilities. They have no usable commits, tags, or standalone release notes and may already be integrated into the V2.0/V3.0 snapshots; no version number or date is assigned, and they are kept separate from the V3.0 entry.
+
+### Early foundation
+
+- Established a pipeline combining local Japanese transcription with `faster-whisper large-v3` and cloud LLM translation and review.
+- Established two-model (`large-v3` and `large-v3-turbo`) transcript comparison and fusion, followed by Japanese review, translation review, and whole-work final review.
+- Added rule-based deduplication and AI-assisted repeat detection to distinguish transcription hallucinations from genuine repeated utterances.
+
+### Reliability and quality control
+
+- Introduced layered output recovery: Function Calling, structured extraction, delimiter/regex fallbacks, and per-line retries.
+- Tuned VAD and Whisper anti-repetition settings for quiet ASMR while retaining utterances found by only one model.
+- Added rules to flag empty translations, index or API artifacts, punctuation-only text, Japanese remnants, omission markers, and review annotations.
+
+### Models, search, and observability
+
+- Added an LLM-call layer with token usage, search-cache hits, and cost reporting.
+- Added optional web lookup for uncertain vocabulary and cultural references, with documented search limitations for NSFW material.
+- Expanded Japanese review into local-batch and full-context phases, and added genre- and mishearing-pattern inference to final review.
 
 ## Documentation-only commits
 

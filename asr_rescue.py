@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import math
+from output_layout import artifact_name, logical_path
+
 import os
 import re
 import copy
@@ -419,8 +421,8 @@ def run_rescue_channel(
     document = load_evidence(evidence_path, audio_path)
     actual_stat = os.stat(actual_audio)
     actual_audio_identity = canonical_fingerprint({
-        "resolved_path": os.path.normcase(os.path.realpath(actual_audio)),
-        "name": os.path.basename(actual_audio),
+        "resolved_path": os.path.normcase(str(logical_path(actual_audio))),
+        "name": artifact_name(actual_audio),
         "size_bytes": actual_stat.st_size,
         "mtime_ns": actual_stat.st_mtime_ns,
     })

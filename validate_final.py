@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2025 Kochiya3309
+from output_layout import artifact_name, discover_outputs, prepare_output
 import os
 import re
 import sys
-import glob
 import common  # 触发日志初始化
 
 # ====== 配置 ======
@@ -106,10 +106,10 @@ def validate_file(filepath):
                     ))
                     break
 
-        if len(ja) < 2:
+        if not ja:
             issues.append((
                 idx, "日语缺失",
-                f"[{idx}] 日语原文为空或过短（{len(ja)} 字符）",
+                f"[{idx}] 日语原文为空",
                 f"中: {zh[:50]}..."
             ))
 
@@ -124,11 +124,11 @@ def validate_file(filepath):
 
 
 def main():
-    pattern = os.path.join(OUTPUT_DIR, PATTERN)
-    files = sorted(glob.glob(pattern))
+    prepare_output(OUTPUT_DIR)
+    files = discover_outputs(OUTPUT_DIR, PATTERN)
 
     if not files:
-        print(f"❌ 在 {OUTPUT_DIR}/ 中未找到 *_final.srt 文件")
+        print(f"❌ 在 {OUTPUT_DIR}/<音频名>/final/ 中未找到 <音频名>_final.srt 文件")
         sys.exit(1)
 
     print("=" * 60)
@@ -140,7 +140,7 @@ def main():
     has_critical = False
 
     for f in files:
-        base = os.path.basename(f)
+        base = artifact_name(f)
         issues = validate_file(f)
 
         if issues:

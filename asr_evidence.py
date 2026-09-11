@@ -8,6 +8,8 @@ used both for fresh model output and for legacy SRT caches.
 from __future__ import annotations
 
 import json
+from output_layout import artifact_name
+
 import hashlib
 import math
 import os
@@ -131,7 +133,7 @@ def file_fingerprint(path: str) -> dict:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return {
-        "name": os.path.basename(path),
+        "name": artifact_name(path),
         "size_bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "sha256": digest.hexdigest(),
@@ -386,7 +388,7 @@ def upsert_model_evidence(
         "source_relation": source_relation,
         "source_srt": source_srt,
         "emitted_srt": emitted_srt,
-        "actual_audio_name": os.path.basename(actual_audio),
+        "actual_audio_name": artifact_name(actual_audio),
         "actual_audio_size_bytes": actual_stat.st_size if actual_stat else None,
         "actual_audio_mtime_ns": actual_stat.st_mtime_ns if actual_stat else None,
         "config": transcribe_config,
@@ -559,12 +561,17 @@ def classify_windows(
     candidates: list[dict],
     windows: list[dict],
     templates: tuple[str, ...] = DEFAULT_HALLUCINATION_TEMPLATES,
+    *,
+    quarantine_shared_templates: bool = False,
 ) -> dict:
     """Classify candidates/windows as supported, uncertain, or hallucination.
 
     Low energy or a VAD miss is never sufficient for deletion.  Automatic
     quarantine is intentionally restricted to known templates without
-    independent cross-model support.
+    independent cross-model support.  When there is no human-review gate,
+    callers can also quarantine shared fixed templates: two Whisper variants
+    can emit the same template for the same non-speech region, so agreement is
+    not independent acoustic evidence.
     """
     by_id = {item["evidence_id"]: item for item in candidates}
     candidate_decisions = {}
@@ -595,8 +602,12 @@ def classify_windows(
 
     for item in candidates:
         reasons = []
-        is_turbo_template = item["model_role"] == "turbo" and _is_template(item["text"], templates)
-        if is_turbo_template and item["evidence_id"] not in turbo_templates_with_v3_support:
+        is_template = _is_template(item["text"], templates)
+        is_turbo_template = item["model_role"] == "turbo" and is_template
+        if is_template and quarantine_shared_templates:
+            label = "hallucination"
+            reasons.append("known_fixed_template_without_human_review")
+        elif is_turbo_template and item["evidence_id"] not in turbo_templates_with_v3_support:
             label = "hallucination"
             reasons.append("known_template_without_credible_v3_support")
         elif item["evidence_id"] in supported_pairs:
