@@ -46,6 +46,7 @@
 | ASR、证据与时间轴 | `ensemble_transcribe.py`、`asr_evidence.py`、`asr_rescue.py`、`asr_timeline.py`、`long_cue_alignment.py` |
 | 台本 | `match_scripts.py`、`script_text_io.py`、`script_mapping_state.py`、`script_units.py`、`script_alignment.py`、`script_units_shadow_stage.py` |
 | 审校 | `review_japanese.py`、`translate.py`、`human_review.py`、`review_app.py`、`human_review_gate.py`、`review_final.py`、`validate_final.py`、`strip_japanese.py` |
+| 可选硬字幕交付 | `burn_subtitles.py` 兼容入口；`burn_subtitles_cli.py` 负责交互与编排；`burn_subtitles_style.py` 负责样式模型与校验；`burn_subtitles_engine.py` 负责 FFmpeg 探测、测算与编码 |
 
 ## 配置来源
 

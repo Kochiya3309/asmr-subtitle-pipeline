@@ -6,7 +6,27 @@ This file records user-visible and architectural changes. Dates and commit links
 
 The repository begins with the V3.3 source snapshot. V3.0–V3.2 have no separate commits or tags; their entries below are reconstructed from the version notes stored in that initial commit.
 
+## [4.2.0] - 2026-09-12
+
+### Added
+
+- Hard-subtitle delivery adds High quality and Source-like profiles. High quality uses CQ/CRF 17 with a higher-quality encoder preset; Source-like targets the source video bitrate or falls back to CQ/CRF 15 when that bitrate is unavailable.
+- Added Default and Custom subtitle style modes. Font, size, text and outline colors, outline width, shadow, alignment, and vertical margin provide common choices plus manual entry.
+- Before profile selection, the helper displays source media details and benchmarks an eight-second sample to estimate the total encoding time for all four profiles.
+
+### Changed
+
+- All interactive choices now use Up/Down and Enter, with W/S and Space alternatives. Final confirmation defaults to Start encoding.
+- The root `burn_subtitles.py` remains a compatibility entry point, while CLI orchestration, subtitle styling, and FFmpeg execution now live in focused modules.
+
+### Fixed
+
+- Hard-subtitle custom input now rejects FFmpeg style delimiters and non-finite numeric values before encoding.
+- Recognizable non-UTF-8 SRT files now use an automatically removed UTF-8 benchmark copy so all four profile estimates remain available. The persistent review copy is still created only after final confirmation.
+
 ## [4.1.0] - 2026-09-11
+
+Commit: [`5f3f0d8`](https://github.com/Kochiya3309/asmr-subtitle-pipeline/commit/5f3f0d852897a39a4d33a9c5a4d1a1de10376a97)
 
 ### Added
 

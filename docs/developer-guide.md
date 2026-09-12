@@ -68,6 +68,7 @@ output jobs are excluded from a new run.
 | ASR, evidence, and timelines | `ensemble_transcribe.py`, `asr_evidence.py`, `asr_rescue.py`, `asr_timeline.py`, `long_cue_alignment.py` |
 | Scripts | `match_scripts.py`, `script_text_io.py`, `script_mapping_state.py`, `script_units.py`, `script_alignment.py`, `script_units_shadow_stage.py` |
 | Review | `review_japanese.py`, `translate.py`, `human_review.py`, `review_app.py`, `human_review_gate.py`, `review_final.py`, `validate_final.py`, `strip_japanese.py` |
+| Optional hard-subtitle delivery | `burn_subtitles.py` compatibility entry point; `burn_subtitles_cli.py` interaction and orchestration; `burn_subtitles_style.py` style model and validation; `burn_subtitles_engine.py` FFmpeg probing, benchmarking, and encoding |
 
 ## Configuration sources
 

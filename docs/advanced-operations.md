@@ -33,14 +33,48 @@ Use this only after reviewing the final SRT.
 
 1. Run `start_burn_subtitles.bat`.
 2. Drag in the source video and reviewed SRT when prompted.
-3. Optionally provide a preview start time and duration.
-4. Choose Standard or Fast, inspect the displayed plan, then enter `y` to encode.
+3. Choose Default subtitle styling or Custom. Custom mode provides common presets and manual entry for every style field.
+4. Optionally provide a preview start time and duration.
+5. Choose Standard, Fast, High quality, or Source-like, inspect the displayed plan, then select Start encoding.
+
+Interactive choices use the Up/Down arrow keys and Enter, including subtitle
+style mode, every custom style preset, encoding profile, and final confirmation.
+`W`/`S` and Space are also accepted. Paths, preview times, and values selected
+through “Enter manually” remain normal text input fields. The final confirmation
+defaults to Start encoding; move down once to cancel.
 
 The helper burns subtitles into the first video stream, copies all audio tracks,
 does not overwrite the source, and writes a `_subtitled` or
 `_preview_subtitled` file beside it. It accepts UTF-8 SRT directly and can offer
 a UTF-8 working-copy conversion for recognizable CP932 or GB18030 input after
-confirmation.
+confirmation. Before profile selection, non-UTF-8 input uses an automatically
+removed temporary UTF-8 copy for benchmarking; this does not create the
+persistent working copy early.
+
+Standard keeps the default constant-quality settings. Fast uses a quicker
+encoder preset. High quality uses CQ/CRF 17 and a higher-quality preset, placing
+it between Standard and Source-like for detail retention and expected file size.
+Source-like reads the source video bitrate, targets that bitrate,
+and uses a higher-quality encoder preset so quality and file size stay closer to
+the source. Hard-subtitle rendering always re-encodes the video, so it cannot
+produce pixels mathematically identical to the source. If the source bitrate is
+unavailable, Source-like falls back to high-quality CQ/CRF 15 and reports that
+choice in the preflight summary.
+
+Before profile selection, the helper displays the source path, file size,
+duration, container, total and video bitrates, codec/profile, resolution, frame
+rate, pixel/color metadata, and per-track audio details. It then benchmarks an
+eight-second sample with each profile without creating an output file and shows
+the projected duration beside all four choices. These projections
+use the current machine and source but can still vary with scene complexity.
+
+Default subtitle styling preserves the current Microsoft YaHei/automatic-font
+fallback, size 32, white text, black two-pixel outline, no shadow, bottom-center
+alignment, and vertical margin 54. Custom mode separately configures font, size,
+text color, outline color, outline width, shadow, alignment, and vertical margin.
+Every field offers common choices plus manual entry. Manual colors accept
+`#RRGGBB` or ASS `&HAABBGGRR` notation. The complete selected style is shown in
+the preflight summary.
 
 ### Expected result and first check
 
